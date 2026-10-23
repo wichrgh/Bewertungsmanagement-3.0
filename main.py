@@ -68,11 +68,11 @@ def main_page():
                     
                     tabelle = ui.table(
                         columns = [
-                            {'name': 'bdat_anzeige', 'label': 'Best.-Datum', 'field': 'bdat_anzeige', 'sortable': True},
-                            {'name': 'ldat_anzeige', 'label': 'Lieferdatum', 'field': 'ldat_anzeige', 'sortable': True},
-                            {'name': 'thumb', 'label': 'Bild', 'field': 'thumb'},
-                            {'name': 'num_anzeige', 'label': 'Artikelnr.', 'field': 'num_anzeige', 'sortable': True},
-                            {'name': 'name', 'label': 'Bezeichnung', 'field': 'name', 'sortable': True}
+                            {'name': 'bdat_anzeige', 'label': 'Best.-Datum', 'field': 'bdat_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 15%'},
+                            {'name': 'ldat_anzeige', 'label': 'Lieferdatum', 'field': 'ldat_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 15%'},
+                            {'name': 'thumb', 'label': 'Bild', 'field': 'thumb', 'align': 'left', 'style': 'width: 60px'},
+                            {'name': 'num_anzeige', 'label': 'Artikelnr.', 'field': 'num_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 20%'},
+                            {'name': 'name', 'label': 'Bezeichnung', 'field': 'name', 'sortable': True, 'align': 'left', 'style': 'width: 45%'}
                         ],
                         rows=database.hole_artikel(),
                         selection='single',
@@ -137,6 +137,16 @@ def lade_reward_profil_details_in_dialog(profil_id, container_details):
                     ui.label('Beschreibung:').classes('font-medium text-slate-500 w-28')
                     ui.label(details['beschreibung']).classes('text-slate-600 leading-relaxed')
 
+def update_profil_auswahl_kaskade(lieferant_id, select_reward, container_details):
+    """Triggert die Kaskade: Lädt die Profile neu, sobald der Lieferant gewechselt wird."""
+    container_details.clear()
+    # 1. Neue, gefilterte Optionen aus der Datenbank holen
+    neue_optionen = database.hole_reward_profile_fuer_lieferant(lieferant_id)
+    
+    # 2. ComboBox im Browser live updaten und nullen
+    select_reward.set_options(neue_optionen)
+    select_reward.set_value(None)
+
 def profil_im_header_aktivieren(dialog, inputs):
     """Speichert die Auswahl im RAM und aktualisiert den Header reaktiv."""
     global aktiver_lieferant_id, aktives_reward_profil_id
@@ -157,88 +167,6 @@ def profil_im_header_aktivieren(dialog, inputs):
     
     ui.notify('Testprofil erfolgreich scharfgeschaltet!', type='positive')
     dialog.close()
-
-def update_profil_auswahl_kaskade(lieferant_id, select_reward, container_details):
-    """Triggert die Kaskade: Lädt die Profile neu, sobald der Lieferant gewechselt wird."""
-    container_details.clear()
-    # 1. Neue, gefilterte Optionen aus der Datenbank holen
-    neue_optionen = database.hole_reward_profile_fuer_lieferant(lieferant_id)
-    
-    # 2. ComboBox im Browser live updaten und nullen
-    select_reward.set_options(neue_optionen)
-    select_reward.set_value(None)
-
-def zeige_status_details():
-    """Öffnet das kaskadierende Kontrollzentrum mit sauberer Namensraum-Fluchtung."""
-    global aktiver_lieferant_id, aktives_reward_profil_id
-    
-    # PROFI-FIX: Das Wörterbuch p_inputs wird JETZT ganz oben deklariert!
-    p_inputs = {}
-    
-    lieferanten_options = database.hole_alle_lieferanten()
-
-    with ui.dialog() as dialog, ui.card().classes('p-4 min-w-[520px] border border-slate-200 shadow-xl rounded-lg bg-white'):
-        with ui.column().classes('w-full gap-3 text-xs'):
-            
-            with ui.row().classes('w-full items-center justify-between border-b border-slate-100 pb-1.5'):
-                ui.label('🏆 Test- & Rewardprofile steuern').classes('text-sm font-bold text-slate-700')
-                ui.button(icon='close', on_click=dialog.close).props('dense flat text-color=slate-400')
-            
-            # 1. COMBOBOX LIEFERANTEN
-            with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
-                ui.label('Lieferant:').classes('font-medium text-slate-500 w-28 shrink-0')
-                # Schreibt sich jetzt direkt und sauber in p_inputs!
-                p_inputs['select_lieferant'] = ui.select(
-                    options=lieferanten_options, 
-                    value=aktiver_lieferant_id,
-                    on_change=lambda e: update_profil_auswahl_kaskade(e.value, p_inputs['select_reward'], details_box)
-                ).props('outlined dense').classes('flex-1 text-xs')
-            
-            # 2. KASKADIERENDE COMBOBOX FÜR REWARD-PROFILE
-            with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
-                ui.label('Reward-Profil:').classes('font-medium text-slate-500 w-28 shrink-0')
-                initial_reward_options = database.hole_reward_profile_fuer_lieferant(aktiver_lieferant_id)
-                
-                # Schreibt sich jetzt ebenfalls direkt und sauber in p_inputs!
-                p_inputs['select_reward'] = ui.select(
-                    options=initial_reward_options, 
-                    value=aktives_reward_profil_id,
-                    on_change=lambda e: lade_reward_profil_details_in_dialog(e.value, details_box)
-                ).props('outlined dense').classes('flex-1 text-xs')
-
-            # 3. FLEXIBLE ZEITRÄUME (Nutzt p_inputs von Anfang an!)
-            with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
-                ui.label('Zeitraum von:').classes('font-medium text-slate-500 w-24 shrink-0')
-                
-                start_field = ui.input(placeholder='TT.MM.JJJJ').props('outlined dense').classes('w-36 text-xs')
-                p_inputs['start_input'] = start_field
-                with start_field.add_slot('append'):
-                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_start.open())
-                with ui.menu() as m_start:
-                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, target=start_field: [target.set_value(e.value), m_start.close()])
-
-                ui.label('bis:').classes('font-medium text-slate-500 w-8 text-center shrink-0')
-                
-                ende_field = ui.input(placeholder='TT.MM.JJJJ').props('outlined dense').classes('w-36 text-xs')
-                p_inputs['ende_input'] = ende_field
-                with ende_field.add_slot('append'):
-                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_ende.open())
-                with ui.menu() as menu_ende:
-                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, target=ende_field: [target.set_value(e.value), menu_ende.close()])
-
-            # 4. DETAILS IN VOLLER PRACHT
-            ui.label('Profil-Konditionen & Details:').classes('font-bold text-slate-500 border-b border-slate-100 w-full pb-0.5 mt-1')
-            details_box = ui.column().classes('w-full gap-1')
-            
-            if aktives_reward_profil_id:
-                lade_reward_profil_details_in_dialog(aktives_reward_profil_id, details_box)
-
-            # Aktivierungs-Knopf (Bekommt das perfekt befüllte p_inputs überreicht)
-            with ui.row().classes('w-full justify-end mt-2 pt-2 border-t border-slate-100 shrink-0'):
-                ui.button('Profil aktivieren', on_click=lambda: profil_im_header_aktivieren(dialog, p_inputs))\
-                    .props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-4 py-1 font-semibold shadow-sm')
-
-        dialog.open()
 
 def baue_kopfzeile():
     """Rendert die obere Kopfzeile mitsamt dem automatischen Boot-Loader für aktive Profile."""
@@ -270,7 +198,130 @@ def baue_kopfzeile():
         
         reward_badge.on('click', zeige_status_details)
 
+def _baue_tab_lieferanten(panel):
+    """Rendert Lieferanten-Eingabe und deren Löschliste."""
+    with panel:
+        ui.label('Neuen Lieferanten verankern:').classes('font-bold text-slate-600')
+        with ui.row().classes('w-full items-center gap-2 mb-2 flex-nowrap'):
+            inp = ui.input(placeholder='Name...').props('outlined dense').classes('flex-1 text-xs')
+            def save():
+                if database.lieferant_speichern(inp.value) == "Dublette": ui.notify('Existiert bereits!', type='negative')
+                elif inp.value: ui.notify('Erfolgreich!', type='positive'); inp.set_value(''); box.clear(); draw()
+            ui.button('Anlegen', on_click=save).props('dense unelevated').classes('rounded px-3 text-xs bg-slate-600 text-white')
+        box = ui.column().classes('w-full gap-1 max-h-36 overflow-y-auto')
+        def draw():
+            with box:
+                for idx, name in database.hole_alle_lieferanten().items():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-xs flex-nowrap'):
+                        ui.label(name)
+                        ui.button(icon='delete', on_click=lambda e, i=idx: [database.lieferant_loeschen(i), ui.notify('Gelöscht'), box.clear(), draw()]).props('dense flat text-color=red-500')
+        draw()
+
+def _baue_tab_reward_profile(panel):
+    """Rendert Reward-Eingabe und Lieferanten-Profile mit On-Demand-Refresh."""
+    with panel:
+        ui.label('Profile für Lieferanten definieren:').classes('font-bold text-slate-600')
+        
+        # Das Dropdown zieht sich die Optionen LIVE im Moment des Klicks (on-focus)
+        sel_l = ui.select(options=database.hole_alle_lieferanten(), on_change=lambda e: [box.clear(), draw(e.value)]).props('outlined dense').classes('w-full text-xs')
+        sel_l.on('focus', lambda: sel_l.set_options(database.hole_alle_lieferanten()))
+        
+        inp_n = ui.input(placeholder='Profil-Name (z.B. Premium)...').props('outlined dense').classes('w-full text-xs')
+        inp_z = ui.input(placeholder='Zielvorgabe...').props('outlined dense').classes('w-full text-xs')
+        inp_b = ui.textarea(placeholder='Beschreibung...').props('outlined dense rows=2').classes('w-full text-xs')
+        
+        def save():
+            if database.reward_profil_speichern(sel_l.value, inp_n.value, inp_z.value, inp_b.value) == "Dublette": ui.notify('Profil existiert bereits!', type='negative')
+            else: ui.notify('Erfolgreich!', type='positive'); inp_n.set_value(''); box.clear(); draw(sel_l.value)
+        ui.button('Profil speichern', on_click=save).props('dense unelevated').classes('w-full bg-slate-600 text-white rounded text-xs mt-1')
+        
+        box = ui.column().classes('w-full gap-1 max-h-32 overflow-y-auto mt-2')
+        def draw(lid):
+            if not lid: return
+            import sqlite3
+            with box, sqlite3.connect(database.DB_PATH) as conn:
+                for pid, pname in conn.execute("SELECT ID, ProfilName FROM RewardProfile WHERE LieferantenID=?", (lid,)).fetchall():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-xs flex-nowrap'):
+                        ui.label(pname)
+                        ui.button(icon='delete', on_click=lambda e, p=pid: [conn.execute("DELETE FROM RewardProfile WHERE ID=?", (p,)), ui.notify('Entfernt'), box.clear(), draw(lid)]).props('dense flat text-color=red-500')
+
+def _baue_tab_testzeitraeume(panel, dialog):
+    """Aktiviert Perioden inkl. Kalendericons, Kaskade und listet nahtlose Historie auf."""
+    global aktiver_lieferant_id, aktives_reward_profil_id
+    with panel:
+        p_in = {}
+        
+        # Lieferantenauswahl mit Focus-Refresh und Live-Kaskade für das Reward-Feld
+        p_in['select_lieferant'] = ui.select(options=database.hole_alle_lieferanten(), value=aktiver_lieferant_id).props('outlined dense').classes('w-full text-xs')
+        p_in['select_lieferant'].on('focus', lambda: p_in['select_lieferant'].set_options(database.hole_alle_lieferanten()))
+        
+        p_in['select_reward'] = ui.select(options=database.hole_reward_profile_fuer_lieferant(aktiver_lieferant_id), value=aktives_reward_profil_id).props('outlined dense').classes('w-full text-xs')
+        
+        # Kaskaden-Bypass: Wenn der Lieferant wechselt, laden wir die Rewards dieses Lieferanten sofort nach
+        p_in['select_lieferant'].on_value_change(lambda e: [
+            p_in['select_reward'].set_options(database.hole_reward_profile_fuer_lieferant(e.value)),
+            p_in['select_reward'].set_value(None),
+            det.clear()
+        ])
+        p_in['select_reward'].on_value_change(lambda e: lade_reward_profil_details_in_dialog(e.value, det))
+
+        # --- KALENDER-ICONS WIEDER HERGESTELLT & IN ISOLIERTE KÄFIGE GESPERRT ---
+        with ui.row().classes('w-full items-center gap-2 flex-nowrap overflow-visible'):
+            with ui.element('div').classes('relative inline-block w-1/2'):
+                start_field = ui.input(placeholder='Von (TT.MM.JJJJ)').props('outlined dense').classes('w-full text-xs')
+                p_in['start_input'] = start_field
+                with start_field.add_slot('append'):
+                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_start.open())
+                with ui.menu().props('no-parent-event') as m_start:
+                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=start_field, m=m_start: [t.set_value(e.value), m.close()])
+
+            with ui.element('div').classes('relative inline-block w-1/2'):
+                ende_field = ui.input(placeholder='Bis (TT.MM.JJJJ)').props('outlined dense').classes('w-full text-xs')
+                p_in['ende_input'] = ende_field
+                with ende_field.add_slot('append'):
+                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: menu_ende.open())
+                with ui.menu().props('no-parent-event') as menu_ende:
+                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=ende_field, m=menu_ende: [t.set_value(e.value), m.close()])
+
+        det = ui.column().classes('w-full gap-0.5 text-[11px]')
+        if aktives_reward_profil_id: lade_reward_profil_details_in_dialog(aktives_reward_profil_id, det)
+        
+        def activate():
+            if not p_in['select_lieferant'].value or not p_in['select_reward'].value or not p_in['start_input'].value or not p_in['ende_input'].value:
+                ui.notify('Bitte befüllen Sie alle Felder!', type='warning')
+                return
+            database.test_profil_historie_speichern(p_in['select_lieferant'].value, p_in['select_reward'].value, p_in['start_input'].value, p_in['ende_input'].value, "")
+            profil_im_header_aktivieren(dialog, p_in)
+            
+        ui.button('Perioden-Aktivierung', on_click=activate).props('dense unelevated').classes('w-full bg-slate-600 text-white rounded text-xs mt-1')
+        ui.label('📋 Perioden-Historie (Nahtlosigkeits-Check):').classes('font-bold text-slate-500 mt-2 border-t pt-1 text-[11px]')
+        
+        hist_box = ui.column().classes('w-full gap-1 max-h-28 overflow-y-auto')
+        def draw_hist():
+            with hist_box:
+                for item in database.hole_alle_testprofile_historie():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-[11px] flex-nowrap'):
+                        ui.label(f"{item['lieferant']} ({item['profil']}): {item['zeitraum']}")
+                        ui.button(icon='delete', on_click=lambda e, t=item['id']: [database.testzeitraum_loeschen(t), ui.notify('Entfernt'), hist_box.clear(), draw_hist()]).props('dense flat text-color=red-400')
+        draw_hist()
+
+def zeige_status_details():
+    """Öffnet das kaskadierende Kontrollzentrum als schlanke Stammdatenpflege-Maske."""
+    with ui.dialog() as dialog, ui.card().classes('p-3 min-w-[500px] max-w-[550px] border shadow-xl rounded-lg bg-white'):
+        with ui.column().classes('w-full gap-2 text-xs'):
+            with ui.row().classes('w-full items-center justify-between border-b pb-1 shrink-0'):
+                ui.label('⚙️ Stammdaten- & Profilpflege').classes('text-xs font-bold text-slate-700')
+                ui.button(icon='close', on_click=dialog.close).props('dense flat text-color=slate-400')
+            with ui.tabs().classes('w-full dense text-slate-500 border-b') as pflege_tabs:
+                t1 = ui.tab('1. Lieferanten', icon='business')
+                t2 = ui.tab('2. Rewards', icon='workspace_premium')
+                t3 = ui.tab('3. Historie', icon='date_range')
+            with ui.tab_panels(pflege_tabs, value=t3).classes('w-full p-0 bg-white overflow-visible'):
+                _baue_tab_lieferanten(ui.tab_panel(t1).classes('p-1 gap-2 flex flex-col'))
+                _baue_tab_reward_profile(ui.tab_panel(t2).classes('p-1 gap-2 flex flex-col'))
+                _baue_tab_testzeitraeume(ui.tab_panel(t3).classes('p-1 gap-2 flex flex-col overflow-visible'), dialog)
+        dialog.open()
+
 # 4. SERVER-START (Port 8090)
 if __name__ in {"__main__", "__mp_main__"}:
     ui.run(title='Bewertungsmanagement 3.0', reload=False, port=8090, show=False)
-    
