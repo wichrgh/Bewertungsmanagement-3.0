@@ -6,10 +6,10 @@ DB_PATH = 'projekte.db'
 IMAGES_FOLDER = os.path.join(os.path.dirname(__file__), 'images')
 
 def initialize_database():
-    """Erstellt das relationale Schema mitsamt der neuen Bewertungs-Tabelle."""
+    """Erstellt das relationale Schema mitsamt Status- und Qualitäts-Flags."""
     with sqlite3.connect(DB_PATH) as conn:
-
-        # 1. Haupttabelle Artikel
+        
+        # 1. Haupttabelle Artikel (inkl. Status-Flag für Verluste/Diebstahl)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS Artikel (
                 ID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,12 +20,16 @@ def initialize_database():
                 BestellPreis REAL NOT NULL CHECK(BestellPreis >= 0),
                 BestellDatum TEXT NOT NULL,
                 LieferDatum TEXT,
-                HauptBild TEXT
+                HauptBild TEXT,
+                Status INTEGER DEFAULT 1 -- 0=Bestellt, 1=Geliefert, 2=Verlust/Gestohlen
             )
         ''')
+        
+        # Spalten-Sicherheits-Bypass für bestehende DBs
+        try: conn.execute("ALTER TABLE Artikel ADD COLUMN Status INTEGER DEFAULT 1")
+        except sqlite3.OperationalError: pass
 
-        # 2. Bewertungstabelle
-        # Verknüpft über ArtikelID (FOREIGN KEY), tilgt sich automatisch bei Artikel-Löschung (ON DELETE CASCADE)
+        # 2. Bewertungstabelle (inkl. Qualitäts-Flag für qualifizierte Berichte)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS Bewertungen (
                 ID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,44 +37,81 @@ def initialize_database():
                 Sterne INTEGER NOT NULL CHECK(Sterne BETWEEN 1 AND 5),
                 Titel TEXT NOT NULL,
                 Rezension TEXT NOT NULL,
+                Qualifiziert INTEGER DEFAULT 0,
                 FOREIGN KEY (ArtikelID) REFERENCES Artikel(ID) ON DELETE CASCADE
             )
         ''')
+        try: conn.execute("ALTER TABLE Bewertungen ADD COLUMN Qualifiziert INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
 
-        # 3. LIEFERANTEN-STAMMDATEN (Mit unerschütterlichem ID-Anker)
+        # 3. Lieferanten
         conn.execute('''
             CREATE TABLE IF NOT EXISTS Lieferanten (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                LieferantName TEXT NOT NULL UNIQUE
+                ID PRIMARY KEY AUTOINCREMENT,
+                LieferantName TEXT UNIQUE
             )
         ''')
 
-        # 4. REWARD-PROFILE STAMMDATEN (Mit unerschütterlichem ID-Anker)
+        # 4. RewardProfile
         conn.execute('''
             CREATE TABLE IF NOT EXISTS RewardProfile (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                LieferantenID INTEGER NOT NULL,
-                ProfilName TEXT NOT NULL,
-                Vorgaben TEXT NOT NULL,
-                Beschreibung TEXT NOT NULL,
-                FOREIGN KEY (LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE,
+                ID PRIMARY KEY AUTOINCREMENT,
+                LieferantenID INTEGER, 
+                ProfilName TEXT, 
+                Vorgaben TEXT, 
+                Beschreibung TEXT, 
+                FOREIGN KEY(LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE, 
                 UNIQUE(LieferantenID, ProfilName)
             )
         ''')
 
-        # 5. TEST-PROFILE HISTORIE (Die bindende Brücke über IDs verknüpft!)
+        # 5. TestProfile
         conn.execute('''
             CREATE TABLE IF NOT EXISTS TestProfile (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                LieferantenID INTEGER NOT NULL,
-                RewardProfilID INTEGER NOT NULL,
-                StartDatum TEXT NOT NULL,
-                EndDatum TEXT NOT NULL,
-                Konditionen TEXT,
-                FOREIGN KEY (LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE,
-                FOREIGN KEY (RewardProfilID) REFERENCES RewardProfile(ID) ON DELETE RESTRICT
+                ID PRIMARY KEY AUTOINCREMENT, 
+                LieferantenID INTEGER, 
+                RewardProfilID INTEGER, 
+                StartDatum TEXT, 
+                EndDatum TEXT, 
+                Konditionen TEXT, 
+                FOREIGN KEY(LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE, 
+                FOREIGN KEY(RewardProfilID) REFERENCES RewardProfile(ID) ON DELETE RESTRICT
             )
         ''')
+
+def hole_kaufmaennische_kpis():
+    """Berechnet die finanziellen Gegenwerte und Verlustquoten für Ottos Performance."""
+    with sqlite3.connect(DB_PATH) as conn:
+        # Ertragsstatistiken über geschriebene Berichte
+        SQL_WERTE = """
+            SELECT 
+                COUNT(b.ID) as anzahl_berichte,
+                SUM(CASE WHEN b.Qualifiziert = 1 THEN 1 ELSE 0 END) as qualifiziert,
+                AVG(a.BestellPreis) as avg_wert,
+                MIN(a.BestellPreis) as min_wert,
+                MAX(a.BestellPreis) as max_wert,
+                SUM(a.BestellPreis) as gesamt_wert
+            FROM Bewertungen b
+            JOIN Artikel a ON b.ArtikelID = a.ID
+        """
+        res_werte = conn.execute(SQL_WERTE).fetchone()
+        
+        # Verluststatistiken über gestohlene/verlorene Pakete
+        SQL_VERLUST = """
+            SELECT COUNT(ID), SUM(BestellPreis) FROM Artikel WHERE Status = 2
+        """
+        res_verlust = conn.execute(SQL_VERLUST).fetchone()
+        
+        return {
+            'berichte': res_werte[0] or 0,
+            'qualifiziert': res_werte[1] or 0,
+            'avg_preis': round(res_werte[2] or 0.0, 2),
+            'min_preis': round(res_werte[3] or 0.0, 2),
+            'max_preis': round(res_werte[4] or 0.0, 2),
+            'gesamt_preis': round(res_werte[5] or 0.0, 2),
+            'verlust_anzahl': res_verlust[0] or 0,
+            'verlust_summe': round(res_verlust[1] or 0.0, 2)
+        }
 
 def hole_artikel(suche=''):
     """Lädt die Artikel für das linke DataGrid chronologisch sortiert nach ISO-Bestelldatum."""
