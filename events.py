@@ -42,13 +42,13 @@ def maske_leeren():
         inputs['rev_text'].set_value('')
 
 def artikel_hinzufuegen():
-    """Fügt einen neuen Artikel im RAM und auf der SSD hinzu (mit vollem Formatschutz)."""
+    """Fügt einen neuen Artikel im RAM und auf der SSD hinzu (mit entkoppeltem Datumszugriff)."""
     art_num = inputs['num'].value.strip()
     neue_bestell_nr = inputs['bnr'].value.strip()
     bezeichnung = inputs['bez'].value.strip()
     beschreibung = inputs['besch'].value.strip()
     
-    # # 0. BESTELLPREIS-KONVERTIERUNG (Jetzt fehlerfrei integriert!)
+    # 0. BESTELLPREIS-KONVERTIERUNG
     raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
     try: 
         bestell_preis = float(raw_preis) if raw_preis else 0.00
@@ -56,35 +56,44 @@ def artikel_hinzufuegen():
         ui.notify('Ungültiger Preis eingegeben!', type='negative')
         return
 
-    # # 1. Pflichtfelder-Schutz
+    # 1. Pflichtfelder-Schutz
     if not art_num or not neue_bestell_nr or not bezeichnung:
-        ui.notify('Artikelnummer, Bestellnummer and Bezeichnung sind Pflichtfelder!', type='warning')
+        ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
         return
 
-    # # 2. Bestellnummer Format-Schutz (Regex)
+    # 2. Bestellnummer Format-Schutz (Regex)
     bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
     if not re.match(bestellnr_muster, neue_bestell_nr):
         ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
         return
 
-    # # 3. Bestellnummer Dubletten-Schutz (Für Neuanlage)
+    # 3. Bestellnummer Dubletten-Schutz
     with sqlite3.connect(database.DB_PATH) as conn:
         check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ?', (neue_bestell_nr,)).fetchone()
         if check and check[0] > 0:
             ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits im System vergeben!', type='negative')
             return
 
-    # # 4. Datums-Konvertierung nach ISO (Bestell- und Lieferdatum)
-    p_b = inputs['bdat'].value.strip().split('.')
-    iso_bdat = f"{p_b}-{p_b}-{p_b}"
-    
-    raw_l = inputs['ldat'].value.strip() if inputs['ldat'].value else ""
-    iso_ldat = ""
-    if raw_l:
-        p_l = raw_l.split('.')
-        iso_ldat = f"{p_l}-{p_l}-{p_l}"
+    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
+    raw_bdat = str(inputs['bdat'].value).strip()
+    # Falls hier noch Müllreste stehen, säubern wir sie radikal auf reine Ziffern
+    zahlen_b = re.findall(r'\d+', raw_bdat)
+    if len(zahlen_b) == 3:
+        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
+    else:
+        iso_bdat = datetime.now().strftime('%Y-%m-%d')
 
-    # # 5. In die Datenbank schreiben
+    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
+    iso_ldat = ""
+    if raw_ldat:
+        zahlen_l = re.findall(r'\d+', raw_ldat)
+        if len(zahlen_l) == 3:
+            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
+        else:
+            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
+            return
+
+    # 5. In die Datenbank schreiben
     try:
         with sqlite3.connect(database.DB_PATH) as conn:
             SQL = """INSERT INTO Artikel (ArtikelNummer, Bezeichnung, Beschreibung, BestellNummer, BestellPreis, BestellDatum, LieferDatum)
@@ -100,7 +109,7 @@ def artikel_hinzufuegen():
         ui.notify(f'Fehler beim Speichern: {e}', type='negative')
 
 def artikel_aktualisieren():
-    """Aktualisiert einen bestehenden Artikel anhand der künstlichen ID (mit vollem Formatschutz)."""
+    """Aktualisiert einen bestehenden Artikel anhand der künstlichen ID (mit entkoppeltem Datumszugriff)."""
     db_id = inputs.get('aktive_db_id')
     if not db_id:
         ui.notify('Bitte wählen Sie zuerst einen Artikel aus der linken Liste!', type='warning')
@@ -111,7 +120,7 @@ def artikel_aktualisieren():
     bezeichnung = inputs['bez'].value.strip()
     beschreibung = inputs['besch'].value.strip()
     
-    # # 0. BESTELLPREIS-KONVERTIERUNG
+    # 0. BESTELLPREIS-KONVERTIERUNG
     raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
     try: 
         bestell_preis = float(raw_preis) if raw_preis else 0.00
@@ -119,40 +128,47 @@ def artikel_aktualisieren():
         ui.notify('Ungültiger Preis eingegeben!', type='negative')
         return
 
-    # # 1. Pflichtfelder-Schutz
+    # 1. Pflichtfelder-Schutz
     if not art_num or not neue_bestell_nr or not bezeichnung:
         ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
         return
 
-    # # 2. Bestellnummer Format-Schutz (Regex)
+    # 2. Bestellnummer Format-Schutz (Regex)
     bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
     if not re.match(bestellnr_muster, neue_bestell_nr):
         ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
         return
 
-    # # 3. Bestellnummer Dubletten-Schutz (Eigene ID ausgeschlossen!)
+    # 3. Bestellnummer Dubletten-Schutz
     with sqlite3.connect(database.DB_PATH) as conn:
         check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ? AND ID != ?', (neue_bestell_nr, db_id)).fetchone()
         if check and check[0] > 0:
             ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits vergeben!', type='negative')
             return
 
-    # # 4. Datums-Konvertierung nach ISO (Bestell- und Lieferdatum)
-    p_b = inputs['bdat'].value.strip().split('.')
-    iso_bdat = f"{p_b}-{p_b}-{p_b}"
-    
-    raw_l = inputs['ldat'].value.strip() if inputs['ldat'].value else ""
-    iso_ldat = ""
-    if raw_l:
-        p_l = raw_l.split('.')
-        iso_ldat = f"{p_l}-{p_l}-{p_l}"
+    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
+    raw_bdat = str(inputs['bdat'].value).strip()
+    zahlen_b = re.findall(r'\d+', raw_bdat)
+    if len(zahlen_b) == 3:
+        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
+    else:
+        iso_bdat = datetime.now().strftime('%Y-%m-%d')
 
-    # # 5. Datenbank-Update ausführen
+    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
+    iso_ldat = ""
+    if raw_ldat:
+        zahlen_l = re.findall(r'\d+', raw_ldat)
+        if len(zahlen_l) == 3:
+            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
+        else:
+            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
+            return
+
+    # 5. Datenbank-Update ausführen
     try:
         with sqlite3.connect(database.DB_PATH) as conn:
-            # Vorab alte Artikelnummer holen, falls Bilder umbenannt werden müssen
             res = conn.execute('SELECT ArtikelNummer FROM Artikel WHERE ID = ?', (db_id,)).fetchone()
-            alte_art_num = res if res else ""
+            alte_art_num = res[0] if res else ""
 
             SQL = """UPDATE Artikel 
                      SET ArtikelNummer = ?, Bezeichnung = ?, Beschreibung = ?, BestellNummer = ?, 
@@ -160,7 +176,6 @@ def artikel_aktualisieren():
                      WHERE ID = ?"""
             conn.execute(SQL, (art_num, bezeichnung, beschreibung, neue_bestell_nr, bestell_preis, iso_bdat, iso_ldat, db_id))
             
-            # Bilder auf Festplatte umbenennen, falls die Artikelnummer geändert wurde
             if alte_art_num and alte_art_num != art_num and os.path.exists(database.IMAGES_FOLDER):
                 for datei in os.listdir(database.IMAGES_FOLDER):
                     if datei.startswith(f"{alte_art_num}_"):
