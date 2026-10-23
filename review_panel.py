@@ -1,102 +1,122 @@
+import os
+from datetime import datetime
 from nicegui import ui
+import database
 import events
+import media
+import media_panel
+import review_panel
 
-EMOJIS_FACE = ['😀','😁','😂','🤣','😃','😄','😅','😆','😉','😊','😋','😎','😍','😘','🥰','🙂','🤗','🤩','🤔','👍','👎','👏','🙌','💪']
-EMOJIS_OBJ = ['📦','🏷️','🚚','🚛','🛒','📁','📂','📅','📆','📊','📈','📉','🛠️','⚙️','💻','🖥️','📱','💰','💵','💳','🧰']
-EMOJIS_SYM = ['⭐','🌟','✨','⚡','💥','🔥','💯','❌','⭕','🛑','🚫','⚠️','✅','✔️','❓','❗','📢','📣','💬','💭','❤️']
-
-def injiziere_text_an_cursor(inputs, text_to_insert):
-    """Injiziert Text/Emojis basierend auf dem clientseitigen Browser-Gedächtnis."""
-    textarea = inputs['rev_text']
-    js_text = text_to_insert.replace('\\', '\\\\').replace('\n', '\\n').replace("'", "\\'")
+def baue_rechtes_panel(haupt_splitter, inputs, tabelle, suchfeld):
+    """Baut das rechte Bedienfeld mit Stammdaten, Medien und lädt das Bewertungsmodul."""
     
-    ui.run_javascript(f'''
-        const el = document.getElementById("{textarea.id}")?.querySelector("textarea");
-        if (el) {{
-            // Hole die exakte Position aus dem globalen Speicher
-            const pos = window._rev_text_cursor !== undefined ? window._rev_text_cursor : el.value.length;
-            const text = el.value;
+    with haupt_splitter.after:
+        with ui.column().classes('w-full h-full p-1 overflow-y-auto spacing-2'):
             
-            // Text punktgenau einschieben
-            el.value = text.substring(0, pos) + '{js_text}' + text.substring(pos);
-            
-            // Position im Browser-Gedächtnis direkt weiterschieben (für Mehrfachklicks)
-            const neuePos = pos + '{js_text}'.length;
-            window._rev_text_cursor = neuePos;
-            el.selectionStart = el.selectionEnd = neuePos;
-            
-            // NiceGUI-Hintergrund synchronisieren
-            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            el.focus();
-        }}
-    ''')
+            # WIEDERAUFKLAPP-BALKEN
+            with ui.row().classes('w-full shrink-0 mb-1'):
+                ui.button('Artikel-Auswahl einblenden', icon='chevron_right', 
+                          on_click=lambda: haupt_splitter.set_value(30))\
+                          .props('dense flat text-color=blue-600').classes('bg-blue-50 w-full text-xs font-semibold py-1 rounded').bind_visibility_from(haupt_splitter, 'value', backward=lambda v: v == 0)
 
-def aktualisiere_baustein_buttons(container, inputs):
-    container.clear()
-    raw_text = inputs['rev_bausteine_input'].value or ""
-    teile = [t.strip() for t in raw_text.split(',') if t.strip()]
-    with container:
-        for bst in teile:
-            ui.button(bst, on_click=lambda e, txt=bst: injiziere_text_an_cursor(inputs, f"\n\n**{txt}**\n"))\
-                .props('dense flat text-color=slate-600').classes('bg-white border border-slate-200 text-[10px] px-1.5 py-0 rounded hover:bg-slate-100')
+            # ------------------------------------------------------------------
+            # BORDER 1: STAMMDATEN (UNZERSTÖRBARER CONTAINER-FIX)
+            # ------------------------------------------------------------------
+            with ui.column().classes('w-full p-3 bg-white border border-slate-200 rounded-md shadow-sm shrink-0') as box_stammdaten:
+                header_stammdaten = ui.row().classes('w-full items-center gap-2 border-b border-slate-200 pb-1 mb-2 cursor-pointer hover:bg-slate-50 p-0.5 rounded')
+                with header_stammdaten:
+                    ui.icon('assignment', color='slate-700').classes('text-base shrink-0')
+                    ui.label('Artikel-Stammdaten').classes('custom-title flex-1')
 
-def baue_bewertungs_inhalt(inhalt_bewertung, inputs):
-    """Baut die inneren Elemente des Amazon-Bewertungsmoduls auf."""
-    with inhalt_bewertung:
-        with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
-            ui.label('Bewertung:').classes('text-xs font-medium text-slate-500 w-24')
-            inputs['rev_sterne'] = ui.rating(value=5).props('size=sm color=orange-400')
-            ui.label('Titel:').classes('text-xs font-medium text-slate-500 w-10 text-right')
-            inputs['rev_titel'] = ui.input(placeholder='Kurzes Fazit...').props('outlined dense').classes('flex-1 text-xs')
-        
-        with ui.row().classes('w-full items-center gap-2 mb-1'):
-            ui.label('Bausteine-Edit:').classes('text-xs font-medium text-slate-500 w-24')
-            inputs['rev_bausteine_input'] = ui.input(
-                value="Verpackung & Versand, Optik/Haptik, Inbetriebnahme, Handhabung, Fazit"
-            ).props('outlined dense placeholder="Mit Komma trennen..."').classes('flex-1 text-xs')
+                with ui.column().classes('w-full spacing-1 font-normal') as inhalt_stammdaten:
+                    with ui.row().classes('w-full items-center gap-2 mb-1 flex-nowrap'):
+                        ui.label('Bestell-Nr:').classes('w-18 text-xs font-medium text-slate-500 shrink-0')
+                        inputs['bnr'] = ui.input(placeholder='000-0000000-0000000').props('outlined dense').classes('w-44 text-xs')
+                        
+                        # --- 1. BESTELLDATUM IM EIGENEN KÄFIG ---
+                        ui.label('Bestellt:').classes('w-14 text-xs font-medium text-slate-500 text-right shrink-0')
+                        with ui.element('div').classes('relative inline-block'):
+                            bdat_input = ui.input(value=datetime.now().strftime('%d.%m.%Y')).props('outlined dense').classes('w-36 text-xs')
+                            inputs['bdat'] = bdat_input
+                            with bdat_input.add_slot('append'):
+                                ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_bdat.open())
+                            with ui.menu().props('no-parent-event') as m_bdat:
+                                ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=bdat_input, m=m_bdat: [t.set_value(e.value), m.close()])
+                        
+                        # --- 2. LIEFERDATUM IM EIGENEN KÄFIG ---
+                        ui.label('Geliefert:').classes('w-16 text-xs font-medium text-slate-500 text-right shrink-0')
+                        with ui.element('div').classes('relative inline-block'):
+                            ldat_input = ui.input(placeholder='TT.MM.JJJJ').props('outlined dense').classes('w-36 text-xs')
+                            inputs['ldat'] = ldat_input
+                            with ldat_input.add_slot('append'):
+                                ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_ldat.open())
+                            with ui.menu().props('no-parent-event') as m_ldat:
+                                ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=ldat_input, m=m_ldat: [t.set_value(e.value), m.close()])
+                                                                                                        
+                    with ui.row().classes('w-full items-center gap-2 mb-1'):
+                        ui.label('Art.-Nr:').classes('w-18 text-xs font-medium text-slate-500')
+                        inputs['num'] = ui.input(placeholder='Z.B. AB12345678').props('outlined dense maxlength="10"').classes('w-36 text-xs uppercase')
+                        ui.label('Preis (€):').classes('w-14 text-xs font-medium text-slate-500 text-right')
+                        inputs['preis'] = ui.input(placeholder='0,00').props('outlined Budget dense').classes('w-24 text-xs')
 
-        baustein_container = ui.row().classes('w-full items-center gap-1.5 bg-slate-50 p-1.5 rounded-md border border-slate-100 flex-wrap')
-        inputs['rev_bausteine_input'].on('value-change', lambda: aktualisiere_baustein_buttons(baustein_container, inputs))
-        aktualisiere_baustein_buttons(baustein_container, inputs)
+                    with ui.row().classes('w-full items-center gap-2 mb-1'):
+                        ui.label('Bezeichn.:').classes('w-18 text-xs font-medium text-slate-500')
+                        inputs['bez'] = ui.input().props('outlined dense').classes('flex-1 text-xs')
 
-        with ui.row().classes('w-full items-start gap-2 flex-nowrap'):
-            with ui.column().classes('w-24 items-start gap-1 shrink-0'):
-                ui.label('Rezension:').classes('text-xs font-medium text-slate-500 pt-2')
-                btn_emoji = ui.button(icon='sentiment_satisfied_alt').props('dense flat text-color=slate-500').classes('hover:bg-slate-100 rounded ml-1')
-                with ui.menu().classes('w-80 border border-slate-200 shadow-xl rounded-md bg-white'):
-                    with ui.tabs().classes('w-full dense text-slate-500') as emo_tabs:
-                        tab_face = ui.tab('😀')
-                        tab_obj = ui.tab('📦')
-                        tab_sym = ui.tab('⭐')
-                    with ui.tab_panels(emo_tabs, value=tab_face).classes('w-full p-2 h-44 overflow-y-auto bg-white'):
-                        with ui.tab_panel(tab_face).classes('p-0'):
-                            with ui.element('div').classes('grid grid-cols-6 gap-1 w-full'):
-                                for emo in EMOJIS_FACE:
-                                    ui.button(emo, on_click=lambda e, s=emo: injiziere_text_an_cursor(inputs, s)).props('dense flat').classes('text-base p-1 hover:bg-slate-100 min-w-0 w-full col-span-1')
-                        with ui.tab_panel(tab_obj).classes('p-0'):
-                            with ui.element('div').classes('grid grid-cols-6 gap-1 w-full'):
-                                for emo in EMOJIS_OBJ:
-                                    ui.button(emo, on_click=lambda e, s=emo: injiziere_text_an_cursor(inputs, s)).props('dense flat').classes('text-base p-1 hover:bg-slate-100 min-w-0 w-full col-span-1')
-                        with ui.tab_panel(tab_sym).classes('p-0'):
-                            with ui.element('div').classes('grid grid-cols-6 gap-1 w-full'):
-                                for emo in EMOJIS_SYM:
-                                    ui.button(emo, on_click=lambda e, s=emo: injiziere_text_an_cursor(inputs, s)).props('dense flat').classes('text-base p-1 hover:bg-slate-100 min-w-0 w-full col-span-1')
+                    with ui.row().classes('w-full items-center gap-2 mb-1'):
+                        ui.label('Beschreib.:').classes('w-18 text-xs font-medium text-slate-500')
+                        inputs['besch'] = ui.textarea().props('outlined dense rows=4').classes('flex-1 text-xs')
 
-            inputs['rev_text'] = ui.textarea(placeholder='Schreiben Sie Ihren Testbericht...').props('outlined dense rows=5').classes('flex-1 text-xs')
-            
-            # UNZERSTÖRBAR-NATIV-BINDING: Injiziert die Event-Lauscher direkt auf dem echten HTML-Textknoten, sobald dieser im Browser erwacht!
-            inputs['rev_text'].on('init', js_handler=f'''() => {{
-                const ta = document.getElementById("{inputs["rev_text"].id}")?.querySelector("textarea");
-                if (ta) {{
-                    const updateCursor = () => {{ window._rev_text_cursor = ta.selectionStart; }};
-                    ta.addEventListener("click", updateCursor);
-                    ta.addEventListener("keyup", updateCursor);
-                    ta.addEventListener("keydown", updateCursor);
-                    ta.addEventListener("blur", updateCursor);
-                }}
-            }}''')
+                    with ui.row().classes('w-full justify-between mt-2 pt-1 border-t border-slate-100 shrink-0'):
+                        inputs['btn_leeren'] = ui.button('Neuen Artikel anlegen').props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-3 text-xs font-semibold shadow-sm')
+                        with ui.row().classes('gap-1'):
+                            inputs['btn_loeschen'] = ui.button('Artikel löschen').props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-3 text-xs font-semibold shadow-sm')
+                            inputs['btn_aktualisieren'] = ui.button('Artikel aktualisieren').props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-3 text-xs font-semibold shadow-sm')
+                            inputs['btn_hinzufuegen'] = ui.button('Artikel hinzufügen').props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-3 text-xs font-semibold shadow-sm')
 
-        with ui.row().classes('w-full justify-end mt-1 pt-1 border-t border-slate-100 shrink-0'):
-            ui.button('Testbericht speichern', on_click=lambda: events.bewertung_speichern()).props('dense unelevated').style('background-color: #475569 !important; color: white !important;').classes('rounded px-4 text-xs font-semibold shadow-sm')
+            # ------------------------------------------------------------------
+            # BORDER 2: PRODUKT-MEDIEN & GALERIE
+            # ------------------------------------------------------------------
+            with ui.column().classes('w-full p-3 bg-white border border-slate-200 rounded-md shadow-sm mt-1') as box_medien:
+                header_medien = ui.row().classes('w-full items-center gap-2 border-b border-slate-200 pb-1 mb-2 cursor-pointer hover:bg-slate-50 p-0.5 rounded')
+                with header_medien:
+                    ui.icon('collections', color='slate-700').classes('text-base shrink-0')
+                    ui.label('Produkt-Medien & Galerie').classes('custom-title flex-1')
 
-# https://share.google/aimode/McyFNyHWv17XjF50v
+                with ui.column().classes('w-full font-normal') as inhalt_medien:
+                    uploader = ui.upload(label='Bilder droppen', auto_upload=True).props('hide-upload-btn dense flat square')
+                    galerie_panel = ui.row()
+                    grossbild = ui.interactive_image().props('contain')
+                    
+                    uploader.on_upload(lambda e: media.bild_hinzufuegen(e, uploader, galerie_panel, grossbild, tabelle, inputs['num']))
+                    
+                    handler_dict = {
+                        'setze_hauptbild': lambda: media.setze_hauptbild(galerie_panel, grossbild, tabelle),
+                        'bild_loeschen': lambda: media.bild_loeschen(galerie_panel, grossbild, tabelle)
+                    }
+                    
+                    media_panel.baue_medien_bereich(inhalt_medien, handler_dict, galerie_panel, grossbild, uploader)
+
+                    inputs['btn_main'] = ui.element('div')  
+                    inputs['btn_del_bild'] = ui.element('div')
+
+            # ------------------------------------------------------------------
+            # BORDER 3: ARTIKEL-BEWERTUNG
+            # ------------------------------------------------------------------
+            with ui.column().classes('w-full p-3 bg-white border border-slate-200 rounded-md shadow-sm mt-1') as box_bewertung:
+                header_bewertung = ui.row().classes('w-full items-center gap-2 border-b border-slate-200 pb-1 mb-2 cursor-pointer hover:bg-slate-50 p-0.5 rounded')
+                with header_bewertung:
+                    ui.icon('rate_review', color='slate-700').classes('text-base shrink-0')
+                    ui.label('Produkt-Bewertung & Rezension').classes('custom-title flex-1')
+
+                with ui.column().classes('w-full font-normal gap-2') as inhalt_bewertung:
+                    review_panel.baue_bewertungs_inhalt(inhalt_bewertung, inputs)
+
+            # ==================================================================
+            # 3. NATIVE EVENTS BINDEN
+            # ==================================================================
+            events.get_event_handlers(inputs, tabelle, suchfeld, galerie_panel, grossbild, uploader, haupt_splitter)
+
+            header_stammdaten.on('click', lambda: setattr(inhalt_stammdaten, 'visible', not inhalt_stammdaten.visible))
+            header_medien.on('click', lambda: setattr(inhalt_medien, 'visible', not inhalt_medien.visible))
+            header_bewertung.on('click', lambda: setattr(inhalt_bewertung, 'visible', not inhalt_bewertung.visible))
