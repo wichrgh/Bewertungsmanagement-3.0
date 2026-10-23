@@ -191,3 +191,89 @@ def hole_heute_aktives_testprofil():
 
         # Gibt die IDs und Namen als sauberes Wörterbuch zurück, falls vorhanden
         return dict(l_id=res[0], l_name=res[1], r_id=res[2], r_name=res[3]) if res else None
+
+def lieferant_speichern(name):
+    """Fügt einen neuen Lieferanten hinzu."""
+    if not name.strip(): return False
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("INSERT INTO Lieferanten (LieferantName) VALUES (?)", (name.strip(),))
+        return True
+    except sqlite3.IntegrityError:
+        return "Dublette"
+
+def lieferant_loeschen(lieferant_id):
+    """Löscht einen Lieferanten (Kaskadiert automatisch auf RewardProfile!)."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM Lieferanten WHERE ID = ?", (lieferant_id,))
+        return True
+    except Exception:
+        return False
+
+def reward_profil_speichern(lieferanten_id, profil_name, vorgaben, beschreibung):
+    """Speichert ein neues Reward-Profil für einen Lieferanten."""
+    if not lieferanten_id or not profil_name.strip(): return False
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO RewardProfile (LieferantenID, ProfilName, Vorgaben, Beschreibung) VALUES (?, ?, ?, ?)",
+                (lieferanten_id, profil_name.strip(), vorgaben.strip(), beschreibung.strip())
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return "Dublette"
+
+def test_profil_historie_speichern(lieferanten_id, reward_profil_id, start_de, ende_de, konditionen):
+    """Speichert ein Testprofil mit automatischer ISO-Konvertierung der Laufzeiten."""
+    try:
+        # Datums-Konvertierung von UI (TT.MM.JJJJ) nach SQL-ISO (JJJJ-MM-TT)
+        p_s = start_de.strip().split('.')
+        p_e = ende_de.strip().split('.')
+        
+        if len(p_s) != 3 or len(p_e) != 3: return "Formatfehler"
+        
+        iso_start = f"{p_s[2]}-{p_s[1]}-{p_s[0]}"
+        iso_ende = f"{p_e[2]}-{p_e[1]}-{p_e[0]}"
+        
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO TestProfile (LieferantenID, RewardProfilID, StartDatum, EndDatum, Konditionen) VALUES (?, ?, ?, ?, ?)",
+                (lieferanten_id, reward_profil_id, iso_start, iso_ende, konditionen.strip())
+            )
+        return True
+    except Exception:
+        return False
+
+def hole_alle_testprofile_historie():
+    """Holt die gesamte Historie der Testzeiträume für Ottos Nahtlosigkeits-Prüfung."""
+    with sqlite3.connect(DB_PATH) as conn:
+        SQL = """
+            SELECT tp.ID, l.LieferantName, rp.ProfilName, tp.StartDatum, tp.EndDatum
+            FROM TestProfile tp
+            JOIN Lieferanten l ON tp.LieferantenID = l.ID
+            JOIN RewardProfile rp ON tp.RewardProfilID = rp.ID
+            ORDER BY tp.StartDatum DESC
+        """
+        cursor = conn.execute(SQL)
+        # Rückgabe als UI-konformes deutsches Datumsformat
+        liste = []
+        for r in cursor.fetchall():
+            p_s = r[3].split('-')
+            p_e = r[4].split('-')
+            liste.append({
+                'id': r[0],
+                'lieferant': r[1],
+                'profil': r[2],
+                'zeitraum': f"{p_s[2]}.{p_s[1]}.{p_s[0]} bis {p_e[2]}.{p_e[1]}.{p_e[0]}"
+            })
+        return liste
+
+def testzeitraum_loeschen(zeitraum_id):
+    """Löscht eine Periode aus der Historie."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM TestProfile WHERE ID = ?", (zeitraum_id,))
+        return True
+    except Exception:
+        return False
