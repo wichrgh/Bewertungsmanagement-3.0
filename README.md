@@ -1,320 +1,359 @@
-from nicegui import ui
-import sqlite3
+import re
 import os
+import sqlite3
+from datetime import datetime
+from nicegui import ui
+import database
+import media
 
-DB_PATH = 'projekte.db'
-IMAGES_FOLDER = os.path.join(os.path.dirname(__file__), 'images')
+# Lokale Referenzen für dieses Modul
+inputs = None
+tabelle = None
+suchfeld = None
+galerie_panel = None
+grossbild = None
+uploader = None
 
-def initialize_database():
-    """Erstellt das relationale Schema mitsamt Status- und Qualitäts-Flags."""
-    with sqlite3.connect(DB_PATH) as conn:
-        
-        # 1. Haupttabelle Artikel (inkl. Status-Flag für Verluste/Diebstahl)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS Artikel (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                ArtikelNummer TEXT NOT NULL UNIQUE,
-                Bezeichnung TEXT NOT NULL,
-                Beschreibung TEXT,
-                BestellNummer TEXT NOT NULL UNIQUE,
-                BestellPreis REAL NOT NULL CHECK(BestellPreis >= 0),
-                BestellDatum TEXT NOT NULL,
-                LieferDatum TEXT,
-                HauptBild TEXT,
-                Status INTEGER DEFAULT 1 -- 0=Bestellt, 1=Geliefert, 2=Verlust/Gestohlen
-            )
-        ''')
-        
-        # Spalten-Sicherheits-Bypass für bestehende DBs
-        try: conn.execute("ALTER TABLE Artikel ADD COLUMN Status INTEGER DEFAULT 1")
-        except sqlite3.OperationalError: pass
-
-        # 2. Bewertungstabelle (inkl. Qualitäts-Flag für qualifizierte Berichte)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS Bewertungen (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                ArtikelID INTEGER NOT NULL UNIQUE,
-                Sterne INTEGER NOT NULL CHECK(Sterne BETWEEN 1 AND 5),
-                Titel TEXT NOT NULL,
-                Rezension TEXT NOT NULL,
-                Qualifiziert INTEGER DEFAULT 0,
-                FOREIGN KEY (ArtikelID) REFERENCES Artikel(ID) ON DELETE CASCADE
-            )
-        ''')
-        try: conn.execute("ALTER TABLE Bewertungen ADD COLUMN Qualifiziert INTEGER DEFAULT 0")
-        except sqlite3.OperationalError: pass
-
-        # 3. Lieferanten
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS Lieferanten (
-                ID PRIMARY KEY AUTOINCREMENT,
-                LieferantName TEXT UNIQUE
-            )
-        ''')
-
-        # 4. RewardProfile
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS RewardProfile (
-                ID PRIMARY KEY AUTOINCREMENT,
-                LieferantenID INTEGER, 
-                ProfilName TEXT, 
-                Vorgaben TEXT, 
-                Beschreibung TEXT, 
-                FOREIGN KEY(LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE, 
-                UNIQUE(LieferantenID, ProfilName)
-            )
-        ''')
-
-        # 5. TestProfile
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS TestProfile (
-                ID PRIMARY KEY AUTOINCREMENT, 
-                LieferantenID INTEGER, 
-                RewardProfilID INTEGER, 
-                StartDatum TEXT, 
-                EndDatum TEXT, 
-                Konditionen TEXT, 
-                FOREIGN KEY(LieferantenID) REFERENCES Lieferanten(ID) ON DELETE CASCADE, 
-                FOREIGN KEY(RewardProfilID) REFERENCES RewardProfile(ID) ON DELETE RESTRICT
-            )
-        ''')
-
-def hole_kaufmaennische_kpis():
-    """Berechnet die finanziellen Gegenwerte und Verlustquoten für Ottos Performance."""
-    with sqlite3.connect(DB_PATH) as conn:
-        # Ertragsstatistiken über geschriebene Berichte
-        SQL_WERTE = """
-            SELECT 
-                COUNT(b.ID) as anzahl_berichte,
-                SUM(CASE WHEN b.Qualifiziert = 1 THEN 1 ELSE 0 END) as qualifiziert,
-                AVG(a.BestellPreis) as avg_wert,
-                MIN(a.BestellPreis) as min_wert,
-                MAX(a.BestellPreis) as max_wert,
-                SUM(a.BestellPreis) as gesamt_wert
-            FROM Bewertungen b
-            JOIN Artikel a ON b.ArtikelID = a.ID
-        """
-        res_werte = conn.execute(SQL_WERTE).fetchone()
-        
-        # Verluststatistiken über gestohlene/verlorene Pakete
-        SQL_VERLUST = """
-            SELECT COUNT(ID), SUM(BestellPreis) FROM Artikel WHERE Status = 2
-        """
-        res_verlust = conn.execute(SQL_VERLUST).fetchone()
-        
-        return {
-            'berichte': res_werte[0] or 0,
-            'qualifiziert': res_werte[1] or 0,
-            'avg_preis': round(res_werte[2] or 0.0, 2),
-            'min_preis': round(res_werte[3] or 0.0, 2),
-            'max_preis': round(res_werte[4] or 0.0, 2),
-            'gesamt_preis': round(res_werte[5] or 0.0, 2),
-            'verlust_anzahl': res_verlust[0] or 0,
-            'verlust_summe': round(res_verlust[1] or 0.0, 2)
-        }
-
-def hole_artikel(suche=''):
-    """Lädt die Artikel für das linke DataGrid chronologisch sortiert nach ISO-Bestelldatum."""
-    with sqlite3.connect(DB_PATH) as conn:
-        if suche:
-            cursor = conn.execute(
-                'SELECT ID, ArtikelNummer, Bezeichnung, HauptBild, BestellDatum, LieferDatum FROM Artikel '
-                'WHERE ArtikelNummer LIKE ? OR Bezeichnung LIKE ? '
-                'ORDER BY BestellDatum DESC',
-                (f'%{suche}%', f'%{suche}%')
-            )
-        else:
-            cursor = conn.execute(
-                'SELECT ID, ArtikelNummer, Bezeichnung, HauptBild, BestellDatum, LieferDatum FROM Artikel '
-                'ORDER BY BestellDatum DESC'
-            )
-            
-        artikel_liste = []
-        for row in cursor.fetchall():
-            db_id = row[0]
-            art_num = row[1]
-            bezeichnung = row[2]
-            db_bild_name = row[3]
-            db_iso_bdat = row[4]  # Reines ISO-Datum (JJJJ-MM-TT)
-            db_iso_ldat = row[5]  # Reines ISO-Datum (JJJJ-MM-TT)
-            
-            # Konvertierung für die DataGrid-Anzeige (Ohne Altdaten-Fallback)
-            p_b = db_iso_bdat.split('-')
-            de_bdat = f"{p_b[2]}.{p_b[1]}.{p_b[0]}"
-            
-            de_ldat = ""
-            if db_iso_ldat:
-                p_l = db_iso_ldat.split('-')
-                de_ldat = f"{p_l[2]}.{p_l[1]}.{p_l[0]}"
-
-            web_bild_pfad = ''
-            if db_bild_name:
-                physischer_pfad = os.path.join(IMAGES_FOLDER, db_bild_name)
-                if os.path.exists(physischer_pfad):
-                    web_bild_pfad = f"/images/{db_bild_name}?v={int(os.path.getmtime(physischer_pfad))}"
-                    
-            artikel_liste.append({
-                'id': db_id,
-                'num_anzeige': art_num,
-                'name': bezeichnung,
-                'thumb': web_bild_pfad,
-                'bdat_anzeige': de_bdat,
-                'ldat_anzeige': de_ldat
-            })
-            
-    return artikel_liste
-
-def bereinige_verwaiste_bilder():
-    """Vergleicht alle physischen Bilder auf der SSD mit der Datenbank und löscht Verwaiste."""
-    if not os.path.exists(IMAGES_FOLDER):
+def maske_leeren():
+    """Versetzt die Maske sicher in den kaufmännischen Standardzustand."""
+    if not inputs or 'num' not in inputs or inputs['num'] is None:
         return
-        
-    with sqlite3.connect(DB_PATH) as conn:
-        # Holt die reinen Text-Strings der Artikelnummern aus den SQL-Tupeln
-        existierende_artikel = {str(row[0]).strip() for row in conn.execute('SELECT ArtikelNummer FROM Artikel').fetchall()}
-        
-    anzahl_geloescht = 0
-    for datei in os.listdir(IMAGES_FOLDER):
-        if "_supplier_" in datei:
-            teile = datei.split('_supplier_')
-            art_num_aus_datei = str(teile[0]).strip()
+
+    inputs['num'].set_value('')
+    inputs['bez'].set_value('')
+    inputs['besch'].set_value('')
+    inputs['bnr'].set_value('')
+    inputs['preis'].set_value('')
+    inputs['bdat'].set_value(datetime.now().strftime('%d.%m.%Y'))
+    inputs['ldat'].set_value('')
+    tabelle.selected = []
+    
+    media.medien_status['aktiver_artikel'] = None
+    media.medien_status['ausgewaehltes_bild'] = None
+    
+    if galerie_panel:
+        galerie_panel.clear()
+    if grossbild:
+        grossbild.set_source('')
+
+    if 'rev_sterne' in inputs and inputs['rev_sterne']:
+        inputs['rev_sterne'].set_value(5)
+        inputs['rev_titel'].set_value('')
+        inputs['rev_text'].set_value('')
+
+def artikel_hinzufuegen():
+    """Fügt einen neuen Artikel im RAM und auf der SSD hinzu (mit entkoppeltem Datumszugriff)."""
+    art_num = inputs['num'].value.strip()
+    neue_bestell_nr = inputs['bnr'].value.strip()
+    bezeichnung = inputs['bez'].value.strip()
+    beschreibung = inputs['besch'].value.strip()
+    
+    # 0. BESTELLPREIS-KONVERTIERUNG
+    raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
+    try: 
+        bestell_preis = float(raw_preis) if raw_preis else 0.00
+    except ValueError: 
+        ui.notify('Ungültiger Preis eingegeben!', type='negative')
+        return
+
+    # 1. Pflichtfelder-Schutz
+    if not art_num or not neue_bestell_nr or not bezeichnung:
+        ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
+        return
+
+    # 2. Bestellnummer Format-Schutz (Regex)
+    bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
+    if not re.match(bestellnr_muster, neue_bestell_nr):
+        ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
+        return
+
+    # 3. Bestellnummer Dubletten-Schutz
+    with sqlite3.connect(database.DB_PATH) as conn:
+        check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ?', (neue_bestell_nr,)).fetchone()
+        if check and check[0] > 0:
+            ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits im System vergeben!', type='negative')
+            return
+
+    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
+    raw_bdat = str(inputs['bdat'].value).strip()
+    # Falls hier noch Müllreste stehen, säubern wir sie radikal auf reine Ziffern
+    zahlen_b = re.findall(r'\d+', raw_bdat)
+    if len(zahlen_b) == 3:
+        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
+    else:
+        iso_bdat = datetime.now().strftime('%Y-%m-%d')
+
+    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
+    iso_ldat = ""
+    if raw_ldat:
+        zahlen_l = re.findall(r'\d+', raw_ldat)
+        if len(zahlen_l) == 3:
+            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
+        else:
+            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
+            return
+
+    # 5. In die Datenbank schreiben
+    try:
+        with sqlite3.connect(database.DB_PATH) as conn:
+            SQL = """INSERT INTO Artikel (ArtikelNummer, Bezeichnung, Beschreibung, BestellNummer, BestellPreis, BestellDatum, LieferDatum)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"""
+            conn.execute(SQL, (art_num, bezeichnung, beschreibung, neue_bestell_nr, bestell_preis, iso_bdat, iso_ldat))
             
-            # Befindet sich das Bild auf der Platte, aber die ID NICHT in der Datenbank -> Löschen!
-            if art_num_aus_datei not in existierende_artikel:
-                voll_pfad = os.path.join(IMAGES_FOLDER, datei)
-                try:
-                    os.remove(voll_pfad)
-                    anzahl_geloescht += 1
-                except Exception as e:
-                    print(f"Fehler beim automatischen Loeschen von verwaister Datei {datei}: {e}")
-                    
-    if anzahl_geloescht > 0:
-        print(f"[Garbage Collector] {anzahl_geloescht} verwaiste Datei(en) erfolgreich gelöscht.")
-
-def hole_alle_lieferanten():
-    """Holt alle Lieferanten als ID-Namens-Dictionary für die ComboBox."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("SELECT ID, LieferantName FROM Lieferanten ORDER BY LieferantName ASC")
-        return {row[0]: row[1] for row in cursor.fetchall()}
-
-def hole_reward_profile_fuer_lieferant(lieferant_id):
-    """Holt ausschließlich die Reward-Profile eines ganz bestimmten Lieferanten."""
-    if not lieferant_id: return {}
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute(
-            "SELECT ID, ProfilName FROM RewardProfile WHERE LieferantenID = ? ORDER BY ProfilName ASC", 
-            (lieferant_id,)
-        )
-        return {row[0]: row[1] for row in cursor.fetchall()}
-
-def hole_reward_profil_details(profil_id):
-    """Holt die Vorgaben und Beschreibung anhand der stabilen Profil-ID."""
-    if not profil_id: return None
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("SELECT Vorgaben, Beschreibung FROM RewardProfile WHERE ID = ?", (profil_id,))
-        res = cursor.fetchone()
-        return dict(vorgaben=res[0], beschreibung=res[1]) if res else None
-
-def hole_heute_aktives_testprofil():
-    """Sucht in der Historie nach einem Testprofil, das am heutigen Tag gültig ist."""
-    with sqlite3.connect(DB_PATH) as conn:
-        # date('now') zieht das heutige ISO-Datum (JJJJ-MM-TT) für den perfekten mathematischen Vergleich
-        SQL = """
-            SELECT tp.LieferantenID, l.LieferantName, tp.RewardProfilID, rp.ProfilName
-            FROM TestProfile tp
-            JOIN Lieferanten l ON tp.LieferantenID = l.ID
-            JOIN RewardProfile rp ON tp.RewardProfilID = rp.ID
-            WHERE date('now') BETWEEN date(tp.StartDatum) AND date(tp.EndDatum)
-            LIMIT 1
-        """
-        cursor = conn.execute(SQL)
-        res = cursor.fetchone()
-
-        # Gibt die IDs und Namen als sauberes Wörterbuch zurück, falls vorhanden
-        return dict(l_id=res[0], l_name=res[1], r_id=res[2], r_name=res[3]) if res else None
-
-def lieferant_speichern(name):
-    """Fügt einen neuen Lieferanten hinzu."""
-    if not name.strip(): return False
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO Lieferanten (LieferantName) VALUES (?)", (name.strip(),))
-        return True
+        ui.notify('Artikel erfolgreich angelegt!', type='positive')
+        tabelle.rows = database.hole_artikel()
+        maske_leeren()
     except sqlite3.IntegrityError:
-        return "Dublette"
+        ui.notify('Fehler: Artikelnummer existiert bereits!', type='negative')
+    except Exception as e:
+        ui.notify(f'Fehler beim Speichern: {e}', type='negative')
 
-def lieferant_loeschen(lieferant_id):
-    """Löscht einen Lieferanten (Kaskadiert automatisch auf RewardProfile!)."""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("DELETE FROM Lieferanten WHERE ID = ?", (lieferant_id,))
-        return True
-    except Exception:
-        return False
+def artikel_aktualisieren():
+    """Aktualisiert einen bestehenden Artikel anhand der künstlichen ID (mit entkoppeltem Datumszugriff)."""
+    db_id = inputs.get('aktive_db_id')
+    if not db_id:
+        ui.notify('Bitte wählen Sie zuerst einen Artikel aus der linken Liste!', type='warning')
+        return
 
-def reward_profil_speichern(lieferanten_id, profil_name, vorgaben, beschreibung):
-    """Speichert ein neues Reward-Profil für einen Lieferanten."""
-    if not lieferanten_id or not profil_name.strip(): return False
+    art_num = inputs['num'].value.strip()
+    neue_bestell_nr = inputs['bnr'].value.strip()
+    bezeichnung = inputs['bez'].value.strip()
+    beschreibung = inputs['besch'].value.strip()
+    
+    # 0. BESTELLPREIS-KONVERTIERUNG
+    raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
+    try: 
+        bestell_preis = float(raw_preis) if raw_preis else 0.00
+    except ValueError: 
+        ui.notify('Ungültiger Preis eingegeben!', type='negative')
+        return
+
+    # 1. Pflichtfelder-Schutz
+    if not art_num or not neue_bestell_nr or not bezeichnung:
+        ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
+        return
+
+    # 2. Bestellnummer Format-Schutz (Regex)
+    bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
+    if not re.match(bestellnr_muster, neue_bestell_nr):
+        ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
+        return
+
+    # 3. Bestellnummer Dubletten-Schutz
+    with sqlite3.connect(database.DB_PATH) as conn:
+        check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ? AND ID != ?', (neue_bestell_nr, db_id)).fetchone()
+        if check and check[0] > 0:
+            ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits vergeben!', type='negative')
+            return
+
+    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
+    raw_bdat = str(inputs['bdat'].value).strip()
+    zahlen_b = re.findall(r'\d+', raw_bdat)
+    if len(zahlen_b) == 3:
+        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
+    else:
+        iso_bdat = datetime.now().strftime('%Y-%m-%d')
+
+    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
+    iso_ldat = ""
+    if raw_ldat:
+        zahlen_l = re.findall(r'\d+', raw_ldat)
+        if len(zahlen_l) == 3:
+            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
+        else:
+            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
+            return
+
+    # 5. Datenbank-Update ausführen
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO RewardProfile (LieferantenID, ProfilName, Vorgaben, Beschreibung) VALUES (?, ?, ?, ?)",
-                (lieferanten_id, profil_name.strip(), vorgaben.strip(), beschreibung.strip())
-            )
-        return True
+        with sqlite3.connect(database.DB_PATH) as conn:
+            res = conn.execute('SELECT ArtikelNummer FROM Artikel WHERE ID = ?', (db_id,)).fetchone()
+            alte_art_num = res[0] if res else ""
+
+            SQL = """UPDATE Artikel 
+                     SET ArtikelNummer = ?, Bezeichnung = ?, Beschreibung = ?, BestellNummer = ?, 
+                         BestellPreis = ?, BestellDatum = ?, LieferDatum = ?
+                     WHERE ID = ?"""
+            conn.execute(SQL, (art_num, bezeichnung, beschreibung, neue_bestell_nr, bestell_preis, iso_bdat, iso_ldat, db_id))
+            
+            if alte_art_num and alte_art_num != art_num and os.path.exists(database.IMAGES_FOLDER):
+                for datei in os.listdir(database.IMAGES_FOLDER):
+                    if datei.startswith(f"{alte_art_num}_"):
+                        alter_pfad = os.path.join(database.IMAGES_FOLDER, datei)
+                        neuer_dateiname = datei.replace(f"{alte_art_num}_", f"{art_num}_")
+                        os.rename(alter_pfad, os.path.join(database.IMAGES_FOLDER, neuer_dateiname))
+
+        ui.notify('Artikel erfolgreich aktualisiert!', type='positive')
+        
+        import media
+        media.medien_status['aktiver_artikel'] = art_num
+        tabelle.rows = database.hole_artikel()
     except sqlite3.IntegrityError:
-        return "Dublette"
+        ui.notify('Fehler: Diese Artikelnummer existiert bereits im System!', type='negative')
+    except Exception as e:
+        ui.notify(f'Fehler beim Aktualisieren: {e}', type='negative')
 
-def test_profil_historie_speichern(lieferanten_id, reward_profil_id, start_de, ende_de, konditionen):
-    """Speichert ein Testprofil mit automatischer ISO-Konvertierung der Laufzeiten."""
+def artikel_loeschen():
+    """Löscht den Artikel aus SQLite und alle zugehörigen Bilder von der SSD."""
+    art_num = inputs['num'].value.strip()
+    if not art_num:
+        ui.notify('Bitte wählen Sie zuerst einen Artikel aus!', type='warning')
+        return
+
     try:
-        # Datums-Konvertierung von UI (TT.MM.JJJJ) nach SQL-ISO (JJJJ-MM-TT)
-        p_s = start_de.strip().split('.')
-        p_e = ende_de.strip().split('.')
-        
-        if len(p_s) != 3 or len(p_e) != 3: return "Formatfehler"
-        
-        iso_start = f"{p_s[2]}-{p_s[1]}-{p_s[0]}"
-        iso_ende = f"{p_e[2]}-{p_e[1]}-{p_e[0]}"
-        
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO TestProfile (LieferantenID, RewardProfilID, StartDatum, EndDatum, Konditionen) VALUES (?, ?, ?, ?, ?)",
-                (lieferanten_id, reward_profil_id, iso_start, iso_ende, konditionen.strip())
-            )
-        return True
-    except Exception:
-        return False
+        if os.path.exists(database.IMAGES_FOLDER):
+            for datei in os.listdir(database.IMAGES_FOLDER):
+                if datei.startswith(f"{art_num}_supplier_"):
+                    try:
+                        os.remove(os.path.join(database.IMAGES_FOLDER, datei))
+                    except:
+                        pass
 
-def hole_alle_testprofile_historie():
-    """Holt die gesamte Historie der Testzeiträume für Ottos Nahtlosigkeits-Prüfung."""
-    with sqlite3.connect(DB_PATH) as conn:
-        SQL = """
-            SELECT tp.ID, l.LieferantName, rp.ProfilName, tp.StartDatum, tp.EndDatum
-            FROM TestProfile tp
-            JOIN Lieferanten l ON tp.LieferantenID = l.ID
-            JOIN RewardProfile rp ON tp.RewardProfilID = rp.ID
-            ORDER BY tp.StartDatum DESC
-        """
-        cursor = conn.execute(SQL)
-        # Rückgabe als UI-konformes deutsches Datumsformat
-        liste = []
-        for r in cursor.fetchall():
-            p_s = r[3].split('-')
-            p_e = r[4].split('-')
-            liste.append({
-                'id': r[0],
-                'lieferant': r[1],
-                'profil': r[2],
-                'zeitraum': f"{p_s[2]}.{p_s[1]}.{p_s[0]} bis {p_e[2]}.{p_e[1]}.{p_e[0]}"
-            })
-        return liste
+        with sqlite3.connect(database.DB_PATH) as conn:
+            conn.execute("DELETE FROM Artikel WHERE ArtikelNummer = ?", (art_num,))
+            
+        ui.notify('Artikel und Bilder gelöscht!', type='positive')
+        tabelle.rows = database.hole_artikel()
+        maske_leeren()
+    except Exception as e:
+        ui.notify(f'Fehler beim Löschen: {e}', type='negative')
 
-def testzeitraum_loeschen(zeitraum_id):
-    """Löscht eine Periode aus der Historie."""
+def lade_bewertung(art_db_id):
+    """Lädt die Amazon-Rezension passiv aus der DB in die Maske."""
+    with sqlite3.connect(database.DB_PATH) as conn:
+        res = conn.execute('SELECT Sterne, Titel, Rezension FROM Bewertungen WHERE ArtikelID = ?', (art_db_id,)).fetchone()
+    
+    if res:
+        inputs['rev_sterne'].set_value(res[0])
+        inputs['rev_titel'].set_value(res[1])
+        inputs['rev_text'].set_value(res[2])
+    else:
+        # Falls noch keine Bewertung existiert, Maske jungfräulich nullen
+        inputs['rev_sterne'].set_value(5)
+        inputs['rev_titel'].set_value('')
+        inputs['rev_text'].set_value('')
+
+def bewertung_speichern():
+    """Schreibt oder aktualisiert die Rezension stramm in der Datenbank (Upsert)."""
+    db_id = inputs.get('aktive_db_id')
+    if not db_id:
+        ui.notify('Bitte wählen Sie zuerst links einen Artikel aus!', type='warning')
+        return
+
+    sterne = int(inputs['rev_sterne'].value)
+    titel = inputs['rev_titel'].value.strip()
+    text = inputs['rev_text'].value.strip()
+
+    if not titel or not text:
+        ui.notify('Bitte befüllen Sie Titel und Rezensionstext!', type='warning')
+        return
+
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("DELETE FROM TestProfile WHERE ID = ?", (zeitraum_id,))
-        return True
-    except Exception:
-        return False
+        with sqlite3.connect(database.DB_PATH) as conn:
+            # Kaufmännischer SQL-Upsert (Insert oder bei Konflikt direkt Update)
+            conn.execute('''
+                INSERT INTO Bewertungen (ArtikelID, Sterne, Titel, Rezension)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(ArtikelID) DO UPDATE SET
+                    Sterne=excluded.Sterne,
+                    Titel=excluded.Titel,
+                    Rezension=excluded.Rezension
+            ''', (db_id, sterne, titel, text))
+            
+        ui.notify('Testbericht erfolgreich in der Datenbank verankert!', type='positive')
+    except Exception as e:
+        ui.notify(f'Fehler beim Speichern der Bewertung: {e}', type='negative')
+
+def get_event_handlers(p_inputs, p_tabelle, p_suchfeld, p_galerie_panel, p_grossbild, p_uploader, p_haupt_splitter=None):
+    """Zentralisiert alle kaufmännischen Event-Handler und bindet die UI-Referenzen typsicher."""
+    global inputs, tabelle, suchfeld, galerie_panel, grossbild, uploader
+    inputs = p_inputs
+    tabelle = p_tabelle
+    suchfeld = p_suchfeld
+    galerie_panel = p_galerie_panel
+    grossbild = p_grossbild
+    uploader = p_uploader
+
+    def suche():
+        tabelle.rows = database.hole_artikel(suchfeld.value)
+
+    def row_click(e):
+        art_id = None
+        try:
+            if isinstance(e.args, list) and len(e.args) > 0:
+                for arg in e.args:
+                    if isinstance(arg, dict):
+                        if 'id' in arg: art_id = arg['id']; break
+                        elif 'row' in arg and 'id' in arg['row']: art_id = arg['row']['id']; break
+            elif isinstance(e.args, dict):
+                art_id = e.args.get('id') or e.args.get('row', {}).get('id')
+        except: pass
+
+        if not art_id and e.args:
+            art_id = str(e.args) if isinstance(e.args, list) else str(e.args)
+        if not art_id or art_id == "None": return
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            cursor = conn.execute('SELECT * FROM Artikel WHERE ID = ?', (art_id,))
+            row = cursor.fetchone()
+            if row:
+                # Exakte Fluchtung anhand des CREATE TABLE Schemas:
+                inputs['aktive_db_id'] = row[0] # ID
+                inputs['num'].set_value(row[1]) # ArtikelNummer
+                inputs['bez'].set_value(row[2]) # Bezeichnung
+                inputs['besch'].set_value(row[3] if row[3] else '') # Beschreibung (fängt None ab)
+                inputs['bnr'].set_value(row[4]) # BestellNummer
+                inputs['preis'].set_value(str(row[5]).replace('.', ',')) # BestellPreis
+                
+                # Datums-Rückübersetzung (row[6] = BestellDatum, row[7] = LieferDatum)
+                p_b = row[6].split('-')
+                inputs['bdat'].set_value(f"{p_b[2]}.{p_b[1]}.{p_b[0]}")
+                
+                de_ldat = ""
+                if row[7]:
+                    p_l = row[7].split('-')
+                    de_ldat = f"{p_l[2]}.{p_l[1]}.{p_l[0]}"
+                inputs['ldat'].set_value(de_ldat)
+                
+                import media
+                media.medien_status['aktiver_artikel'] = row[1] # ArtikelNummer für Medien-Engine
+                media.lade_bilder_galerie(galerie_panel, grossbild)
+                lade_bewertung(art_id)
+                
+                if 'btn_hinzufuegen' in inputs and inputs['btn_hinzufuegen']: inputs['btn_hinzufuegen'].disable()
+                if 'btn_aktualisieren' in inputs and inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].disable()
+
+    # === DYNAMISCHE TIPP-ÜBERWACHUNG ===
+    def schalte_buttons_auf_geaendert():
+        """Wird getriggert, sobald Otto ein Zeichen in den Stammdaten ändert."""
+        if inputs and 'btn_hinzufuegen' in inputs and inputs['btn_hinzufuegen']:
+            import media
+            if media.medien_status['aktiver_artikel']:
+                inputs['btn_hinzufuegen'].disable()
+                if inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].enable()
+            else:
+                inputs['btn_hinzufuegen'].enable()
+                if inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].disable()
+
+    # Live-Überwachung an alle kritischen Eingabefelder anheften!
+    for feld in ['num', 'bez', 'besch', 'bnr', 'preis', 'bdat', 'ldat']:
+        if feld in inputs and inputs[feld]:
+            inputs[feld].on_value_change(schalte_buttons_auf_geaendert)
+
+    # UI-Klick-Aktionen absolut sicher im geladenen Scope binden
+    inputs['btn_leeren'].on('click', lambda: [maske_leeren(), database.bereinige_verwaiste_bilder(), ui.notify('Maske geleert.', type='info')])
+    inputs['btn_loeschen'].on('click', lambda: artikel_loeschen())
+    inputs['btn_aktualisieren'].on('click', lambda: artikel_aktualisieren())
+    inputs['btn_hinzufuegen'].on('click', lambda: artikel_hinzufuegen())
+    
+    # Medien-Aktionen binden (Das Uploader-Event läuft jetzt unzerstörbar inline!)
+    inputs['btn_main'].on('click', lambda: media.setze_hauptbild(galerie_panel, grossbild, tabelle))
+    inputs['btn_del_bild'].on('click', lambda: media.bild_loeschen(galerie_panel, grossbild, tabelle))
+    
+    suchfeld.on_value_change(lambda e: suche())
+    tabelle.on('row-click', row_click)
+
+    return {
+        'suche': suche, 'row_click': row_click, 'leeren': maske_leeren,
+        'loeschen': artikel_loeschen, 'aktualisieren': artikel_aktualisieren, 'hinzufuegen': artikel_hinzufuegen
+    }
