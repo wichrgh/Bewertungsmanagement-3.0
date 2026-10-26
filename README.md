@@ -1,359 +1,353 @@
-import re
 import os
-import sqlite3
-from datetime import datetime
-from nicegui import ui
+from nicegui import app, ui
 import database
-import media
+import details
 
-# Lokale Referenzen für dieses Modul
-inputs = None
-tabelle = None
-suchfeld = None
-galerie_panel = None
-grossbild = None
-uploader = None
+# 1. DATENBANK INITIALISIEREN
+database.initialize_database()
 
-def maske_leeren():
-    """Versetzt die Maske sicher in den kaufmännischen Standardzustand."""
-    if not inputs or 'num' not in inputs or inputs['num'] is None:
-        return
+# Lokalen Bilderordner über das app-Objekt für den Webbrowser freischalten
+app.add_static_files('/images', database.IMAGES_FOLDER)
 
-    inputs['num'].set_value('')
-    inputs['bez'].set_value('')
-    inputs['besch'].set_value('')
-    inputs['bnr'].set_value('')
-    inputs['preis'].set_value('')
-    inputs['bdat'].set_value(datetime.now().strftime('%d.%m.%Y'))
-    inputs['ldat'].set_value('')
-    tabelle.selected = []
-    
-    media.medien_status['aktiver_artikel'] = None
-    media.medien_status['ausgewaehltes_bild'] = None
-    
-    if galerie_panel:
-        galerie_panel.clear()
-    if grossbild:
-        grossbild.set_source('')
+# 2. DIE CORE-ROUTING-ENGINE
+@ui.page('/')
+def main_page():
+    """Baut das hochkompakte, perfekt austarierte kaufmännische Dashboard."""
 
-    if 'rev_sterne' in inputs and inputs['rev_sterne']:
-        inputs['rev_sterne'].set_value(5)
-        inputs['rev_titel'].set_value('')
-        inputs['rev_text'].set_value('')
-
-def artikel_hinzufuegen():
-    """Fügt einen neuen Artikel im RAM und auf der SSD hinzu (mit entkoppeltem Datumszugriff)."""
-    art_num = inputs['num'].value.strip()
-    neue_bestell_nr = inputs['bnr'].value.strip()
-    bezeichnung = inputs['bez'].value.strip()
-    beschreibung = inputs['besch'].value.strip()
-    
-    # 0. BESTELLPREIS-KONVERTIERUNG
-    raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
-    try: 
-        bestell_preis = float(raw_preis) if raw_preis else 0.00
-    except ValueError: 
-        ui.notify('Ungültiger Preis eingegeben!', type='negative')
-        return
-
-    # 1. Pflichtfelder-Schutz
-    if not art_num or not neue_bestell_nr or not bezeichnung:
-        ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
-        return
-
-    # 2. Bestellnummer Format-Schutz (Regex)
-    bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
-    if not re.match(bestellnr_muster, neue_bestell_nr):
-        ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
-        return
-
-    # 3. Bestellnummer Dubletten-Schutz
-    with sqlite3.connect(database.DB_PATH) as conn:
-        check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ?', (neue_bestell_nr,)).fetchone()
-        if check and check[0] > 0:
-            ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits im System vergeben!', type='negative')
-            return
-
-    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
-    raw_bdat = str(inputs['bdat'].value).strip()
-    # Falls hier noch Müllreste stehen, säubern wir sie radikal auf reine Ziffern
-    zahlen_b = re.findall(r'\d+', raw_bdat)
-    if len(zahlen_b) == 3:
-        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
-    else:
-        iso_bdat = datetime.now().strftime('%Y-%m-%d')
-
-    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
-    iso_ldat = ""
-    if raw_ldat:
-        zahlen_l = re.findall(r'\d+', raw_ldat)
-        if len(zahlen_l) == 3:
-            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
-        else:
-            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
-            return
-
-    # 5. In die Datenbank schreiben
-    try:
-        with sqlite3.connect(database.DB_PATH) as conn:
-            SQL = """INSERT INTO Artikel (ArtikelNummer, Bezeichnung, Beschreibung, BestellNummer, BestellPreis, BestellDatum, LieferDatum)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)"""
-            conn.execute(SQL, (art_num, bezeichnung, beschreibung, neue_bestell_nr, bestell_preis, iso_bdat, iso_ldat))
+    ui.add_head_html('''
+        <style>
+            .no-checkbox-table th:first-child, .no-checkbox-table td:first-child { display: none !important; }
+            .custom-title { color: #334155 !important; font-weight: 700 !important; font-size: 0.875rem !important; }
             
-        ui.notify('Artikel erfolgreich angelegt!', type='positive')
-        tabelle.rows = database.hole_artikel()
-        maske_leeren()
-    except sqlite3.IntegrityError:
-        ui.notify('Fehler: Artikelnummer existiert bereits!', type='negative')
-    except Exception as e:
-        ui.notify(f'Fehler beim Speichern: {e}', type='negative')
+            .q-table tbody tr {
+                contain: layout paint; /* Zwingt den Browser, die Zeile isoliert zu rendern */
+                will-change: transform;
+            }
+            .q-table td {
+                white-space: nowrap; /* Verhindert Text-Zeilenumbrüche beim DOM-Refresh */
+            }
+            .q-notification {
+                font-size: 1.25rem !important;   /* Deutlich größere Schrift (ca. 20px) */
+                font-weight: bold !important;    /* Fetter Text für sofortige Lesbarkeit */
+                padding: 20px 28px !important;   /* Viel mehr Innenabstand (Kasten wird wuchtiger) */
+                border-radius: 12px !important;  /* Schicke, abgerundete Ecken */
+                min-width: 500px !important;     /* Mindestbreite, damit es auf 4K nicht untergeht */
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important; /* Mächtiger Schatten */
+            }
+            .q-notification__icon {
+                font-size: 2rem !important;      /* Doppelte Icon-Größe */
+            }
+        </style>
+    ''')
 
-def artikel_aktualisieren():
-    """Aktualisiert einen bestehenden Artikel anhand der künstlichen ID (mit entkoppeltem Datumszugriff)."""
-    db_id = inputs.get('aktive_db_id')
-    if not db_id:
-        ui.notify('Bitte wählen Sie zuerst einen Artikel aus der linken Liste!', type='warning')
-        return
+    baue_kopfzeile()
 
-    art_num = inputs['num'].value.strip()
-    neue_bestell_nr = inputs['bnr'].value.strip()
-    bezeichnung = inputs['bez'].value.strip()
-    beschreibung = inputs['besch'].value.strip()
-    
-    # 0. BESTELLPREIS-KONVERTIERUNG
-    raw_preis = str(inputs['preis'].value).replace(',', '.').strip()
-    try: 
-        bestell_preis = float(raw_preis) if raw_preis else 0.00
-    except ValueError: 
-        ui.notify('Ungültiger Preis eingegeben!', type='negative')
-        return
-
-    # 1. Pflichtfelder-Schutz
-    if not art_num or not neue_bestell_nr or not bezeichnung:
-        ui.notify('Artikelnummer, Bestellnummer und Bezeichnung sind Pflichtfelder!', type='warning')
-        return
-
-    # 2. Bestellnummer Format-Schutz (Regex)
-    bestellnr_muster = r'^\d{3}-\d{7}-\d{7}$'
-    if not re.match(bestellnr_muster, neue_bestell_nr):
-        ui.notify('Fehler: Bestellnummer entspricht nicht dem Format ###-#######-#######', type='negative')
-        return
-
-    # 3. Bestellnummer Dubletten-Schutz
-    with sqlite3.connect(database.DB_PATH) as conn:
-        check = conn.execute('SELECT COUNT(*) FROM Artikel WHERE BestellNummer = ? AND ID != ?', (neue_bestell_nr, db_id)).fetchone()
-        if check and check[0] > 0:
-            ui.notify('Aktion abgebrochen: Diese Bestellnummer ist bereits vergeben!', type='negative')
-            return
-
-    # 4. Datums-Konvertierung nach ISO - RIGIDER KLARTEXT-BYPASS GEGEN INTERNE RAM-LISTEN!
-    raw_bdat = str(inputs['bdat'].value).strip()
-    zahlen_b = re.findall(r'\d+', raw_bdat)
-    if len(zahlen_b) == 3:
-        iso_bdat = f"{zahlen_b[2]}-{zahlen_b[1]}-{zahlen_b[0]}"
-    else:
-        iso_bdat = datetime.now().strftime('%Y-%m-%d')
-
-    raw_ldat = str(inputs['ldat'].value).strip() if inputs['ldat'].value else ""
-    iso_ldat = ""
-    if raw_ldat:
-        zahlen_l = re.findall(r'\d+', raw_ldat)
-        if len(zahlen_l) == 3:
-            iso_ldat = f"{zahlen_l[2]}-{zahlen_l[1]}-{zahlen_l[0]}"
-        else:
-            ui.notify('Lieferdatum-Format ist ungültig (erwartet: TT.MM.JJJJ)!', type='warning')
-            return
-
-    # 5. Datenbank-Update ausführen
-    try:
-        with sqlite3.connect(database.DB_PATH) as conn:
-            res = conn.execute('SELECT ArtikelNummer FROM Artikel WHERE ID = ?', (db_id,)).fetchone()
-            alte_art_num = res[0] if res else ""
-
-            SQL = """UPDATE Artikel 
-                     SET ArtikelNummer = ?, Bezeichnung = ?, Beschreibung = ?, BestellNummer = ?, 
-                         BestellPreis = ?, BestellDatum = ?, LieferDatum = ?
-                     WHERE ID = ?"""
-            conn.execute(SQL, (art_num, bezeichnung, beschreibung, neue_bestell_nr, bestell_preis, iso_bdat, iso_ldat, db_id))
-            
-            if alte_art_num and alte_art_num != art_num and os.path.exists(database.IMAGES_FOLDER):
-                for datei in os.listdir(database.IMAGES_FOLDER):
-                    if datei.startswith(f"{alte_art_num}_"):
-                        alter_pfad = os.path.join(database.IMAGES_FOLDER, datei)
-                        neuer_dateiname = datei.replace(f"{alte_art_num}_", f"{art_num}_")
-                        os.rename(alter_pfad, os.path.join(database.IMAGES_FOLDER, neuer_dateiname))
-
-        ui.notify('Artikel erfolgreich aktualisiert!', type='positive')
+    # CONTAINER: Perfekt ausgenutzte Höhe für FHD
+    with ui.card().classes('w-full mx-1 my-1 p-2 shadow-md border border-slate-200 rounded-md bg-white h-[96vh] flex flex-col overflow-hidden'):
         
-        import media
-        media.medien_status['aktiver_artikel'] = art_num
-        tabelle.rows = database.hole_artikel()
-    except sqlite3.IntegrityError:
-        ui.notify('Fehler: Diese Artikelnummer existiert bereits im System!', type='negative')
-    except Exception as e:
-        ui.notify(f'Fehler beim Aktualisieren: {e}', type='negative')
+        # TITELLEISTE
+        with ui.row().classes('w-full justify-between items-center border-b border-slate-200 pb-1 mb-1 shrink-0'):
+            ui.label('Bewertungsmanagement 3.0').classes('text-xl font-bold text-slate-850 track-tight')
 
-def artikel_loeschen():
-    """Löscht den Artikel aus SQLite und alle zugehörigen Bilder von der SSD."""
-    art_num = inputs['num'].value.strip()
-    if not art_num:
-        ui.notify('Bitte wählen Sie zuerst einen Artikel aus!', type='warning')
-        return
-
-    try:
-        if os.path.exists(database.IMAGES_FOLDER):
-            for datei in os.listdir(database.IMAGES_FOLDER):
-                if datei.startswith(f"{art_num}_supplier_"):
-                    try:
-                        os.remove(os.path.join(database.IMAGES_FOLDER, datei))
-                    except:
-                        pass
-
-        with sqlite3.connect(database.DB_PATH) as conn:
-            conn.execute("DELETE FROM Artikel WHERE ArtikelNummer = ?", (art_num,))
+        # ==============================================================================
+        # STRATEGISCHES PERFORMANZ- & ERTRAGS-COCKPIT (LIVE-KPI-BAR)
+        # ==============================================================================
+        kpis = database.hole_kaufmaennische_kpis()
+        with ui.row().classes('w-full gap-2 mb-2 shrink-0 flex-nowrap'):
             
-        ui.notify('Artikel und Bilder gelöscht!', type='positive')
-        tabelle.rows = database.hole_artikel()
-        maske_leeren()
-    except Exception as e:
-        ui.notify(f'Fehler beim Löschen: {e}', type='negative')
+            # KPI CARD 1: GEGENWERT-LOGIK
+            with ui.card().classes('flex-1 p-2 bg-slate-50 border border-blue-100 shadow-sm rounded items-center gap-0'):
+                ui.label('🏆 Gesamt-Gegenwert (Behalten)').classes('text-[10px] text-slate-500 font-semibold uppercase tracking-wider')
+                ui.label(f"{kpis['gesamt_preis']:,} €".replace(',', '.')).classes('text-lg font-bold text-blue-600')
+                ui.label(f"Ø {kpis['avg_preis']} € | Min: {kpis['min_preis']} € | Max: {kpis['max_preis']} €").classes('text-[10px] text-slate-400 font-medium')
+                
+            # KPI CARD 2: BERICHTS-PERFORMANCE
+            with ui.card().classes('flex-1 p-2 bg-slate-50 border border-emerald-100 shadow-sm rounded items-center gap-0'):
+                ui.label('✍️ Rezensions-Performance').classes('text-[10px] text-slate-500 font-semibold uppercase tracking-wider')
+                ui.label(f"{kpis['berichte']} Berichte").classes('text-lg font-bold text-emerald-600')
+                ui.label(f"Davon qualifiziert: {kpis['qualifiziert']} Premium-Berichte").classes('text-[10px] text-slate-400 font-medium')
+                
+            # KPI CARD 3: SCHWUND / DIEBSTAHL-METRIK
+            with ui.card().classes('flex-1 p-2 bg-slate-50 border border-red-100 shadow-sm rounded items-center gap-0'):
+                ui.label('🚨 Paket-Schwund & Verluste').classes('text-[10px] text-slate-500 font-semibold uppercase tracking-wider')
+                ui.label(f"{kpis['verlust_anzahl']} Pakete verloren").classes('text-lg font-bold text-red-600')
+                ui.label(f"Finanzieller Schaden: {kpis['verlust_summe']:,} €".replace(',', '.')).classes('text-[10px] text-slate-400 font-medium')
 
-def lade_bewertung(art_db_id):
-    """Lädt die Amazon-Rezension passiv aus der DB in die Maske."""
-    with sqlite3.connect(database.DB_PATH) as conn:
-        res = conn.execute('SELECT Sterne, Titel, Rezension FROM Bewertungen WHERE ArtikelID = ?', (art_db_id,)).fetchone()
-    
-    if res:
-        inputs['rev_sterne'].set_value(res[0])
-        inputs['rev_titel'].set_value(res[1])
-        inputs['rev_text'].set_value(res[2])
-    else:
-        # Falls noch keine Bewertung existiert, Maske jungfräulich nullen
-        inputs['rev_sterne'].set_value(5)
-        inputs['rev_titel'].set_value('')
-        inputs['rev_text'].set_value('')
-
-def bewertung_speichern():
-    """Schreibt oder aktualisiert die Rezension stramm in der Datenbank (Upsert)."""
-    db_id = inputs.get('aktive_db_id')
-    if not db_id:
-        ui.notify('Bitte wählen Sie zuerst links einen Artikel aus!', type='warning')
-        return
-
-    sterne = int(inputs['rev_sterne'].value)
-    titel = inputs['rev_titel'].value.strip()
-    text = inputs['rev_text'].value.strip()
-
-    if not titel or not text:
-        ui.notify('Bitte befüllen Sie Titel und Rezensionstext!', type='warning')
-        return
-
-    try:
-        with sqlite3.connect(database.DB_PATH) as conn:
-            # Kaufmännischer SQL-Upsert (Insert oder bei Konflikt direkt Update)
-            conn.execute('''
-                INSERT INTO Bewertungen (ArtikelID, Sterne, Titel, Rezension)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(ArtikelID) DO UPDATE SET
-                    Sterne=excluded.Sterne,
-                    Titel=excluded.Titel,
-                    Rezension=excluded.Rezension
-            ''', (db_id, sterne, titel, text))
+        # DYNAMISCHER GRID-SPLITTER
+        with ui.splitter(value=30).classes('w-full flex-1 border border-slate-100 rounded-md p-0.5 bg-slate-50 overflow-hidden') as haupt_splitter:
             
-        ui.notify('Testbericht erfolgreich in der Datenbank verankert!', type='positive')
-    except Exception as e:
-        ui.notify(f'Fehler beim Speichern der Bewertung: {e}', type='negative')
+            # ==================================================================
+            # LINKES PANEL: ARTIKELLISTE (Horizontales Einklappen auf Klick!)
+            # ==================================================================
+            with haupt_splitter.before:
+                with ui.column().classes('w-full h-full p-2 bg-white border border-slate-200 rounded-md flex flex-col overflow-hidden'):
+                    
+                    with ui.row().classes('w-full items-center gap-2 border-b border-slate-200 pb-1 mb-2 shrink-0 flex-nowrap cursor-pointer hover:bg-slate-50 p-0.5 rounded').on('click', lambda: setattr(haupt_splitter, 'value', 0)):
+                        ui.icon('chevron_left', color='slate-500').classes('text-base shrink-0')
+                        ui.icon('list_alt', color='slate-700').classes('text-base shrink-0')
+                        ui.label('Artikel-Auswahl').classes('custom-title flex-1')
+                        ui.tooltip('Artikelliste zur Seite ausblenden')
+                    
+                    suchfeld = ui.input(placeholder=' Artikel oder Nummer suchen...').props('outlined dense').classes('w-full mb-1 shrink-0')
+                    
+                    tabelle = ui.table(
+                        columns = [
+                            {'name': 'bdat_anzeige', 'label': 'Best.-Datum', 'field': 'bdat_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 15%'},
+                            {'name': 'ldat_anzeige', 'label': 'Lieferdatum', 'field': 'ldat_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 15%'},
+                            {'name': 'thumb', 'label': 'Bild', 'field': 'thumb', 'align': 'left', 'style': 'width: 60px'},
+                            {'name': 'num_anzeige', 'label': 'Artikelnr.', 'field': 'num_anzeige', 'sortable': True, 'align': 'left', 'style': 'width: 20%'},
+                            {'name': 'name', 'label': 'Bezeichnung', 'field': 'name', 'sortable': True, 'align': 'left', 'style': 'width: 45%'}
+                        ],
+                        rows=database.hole_artikel(),
+                        selection='single',
+                        row_key='id'
+                    )
 
-def get_event_handlers(p_inputs, p_tabelle, p_suchfeld, p_galerie_panel, p_grossbild, p_uploader, p_haupt_splitter=None):
-    """Zentralisiert alle kaufmännischen Event-Handler und bindet die UI-Referenzen typsicher."""
-    global inputs, tabelle, suchfeld, galerie_panel, grossbild, uploader
-    inputs = p_inputs
-    tabelle = p_tabelle
-    suchfeld = p_suchfeld
-    galerie_panel = p_galerie_panel
-    grossbild = p_grossbild
-    uploader = p_uploader
+                    tabelle.props('''
+                        hide-selected-banner 
+                        dense 
+                        flat 
+                        wrap-cells=false 
+                        sort-by="bdat_anzeige" 
+                        binary-state-sort
+                        :sort-method="(rows, sortBy, descending) => sortBy === 'bdat_anzeige' ? rows.sort((a, b) => { const pA = (a.bdat_anzeige || '').split('.'); const pB = (b.bdat_anzeige || '').split('.'); const dA = pA[2]+pA[1]+pA[0]; const dB = pB[2]+pB[1]+pB[0]; return descending ? dB.localeCompare(dA) : dA.localeCompare(dB); }) : rows"
+                    ''')
+                    
+                    tabelle.classes('w-full flex-1 border border-slate-100 rounded-md cursor-pointer no-checkbox-table overflow-y-auto')
 
-    def suche():
-        tabelle.rows = database.hole_artikel(suchfeld.value)
+                    tabelle.add_slot('body-cell-thumb', '''
+                        <q-td :props="props">
+                            <q-img v-if="props.row.thumb" :src="props.row.thumb" style="width: 35px; height: 26px; border-radius: 3px;" class="border border-slate-200" />
+                            <div v-else style="width: 35px; height: 26px;" class="bg-slate-100 rounded border border-dashed border-slate-300"></div>
+                        </q-td>
+                    ''')
 
-    def row_click(e):
-        art_id = None
-        try:
-            if isinstance(e.args, list) and len(e.args) > 0:
-                for arg in e.args:
-                    if isinstance(arg, dict):
-                        if 'id' in arg: art_id = arg['id']; break
-                        elif 'row' in arg and 'id' in arg['row']: art_id = arg['row']['id']; break
-            elif isinstance(e.args, dict):
-                art_id = e.args.get('id') or e.args.get('row', {}).get('id')
-        except: pass
+            # ==================================================================
+            # RECHTES PANEL: DELEGIERT AN DAS NEUE DETAILS-MODUL (Absolut bombensicher!)
+            # ==================================================================
+            inputs = {}
+            details.baue_rechtes_panel(haupt_splitter, inputs, tabelle, suchfeld)
 
-        if not art_id and e.args:
-            art_id = str(e.args) if isinstance(e.args, list) else str(e.args)
-        if not art_id or art_id == "None": return
+# 3. Test- und Reward-Profile
+badge_labels = {}
 
-        with sqlite3.connect(database.DB_PATH) as conn:
-            cursor = conn.execute('SELECT * FROM Artikel WHERE ID = ?', (art_id,))
-            row = cursor.fetchone()
-            if row:
-                # Exakte Fluchtung anhand des CREATE TABLE Schemas:
-                inputs['aktive_db_id'] = row[0] # ID
-                inputs['num'].set_value(row[1]) # ArtikelNummer
-                inputs['bez'].set_value(row[2]) # Bezeichnung
-                inputs['besch'].set_value(row[3] if row[3] else '') # Beschreibung (fängt None ab)
-                inputs['bnr'].set_value(row[4]) # BestellNummer
-                inputs['preis'].set_value(str(row[5]).replace('.', ',')) # BestellPreis
-                
-                # Datums-Rückübersetzung (row[6] = BestellDatum, row[7] = LieferDatum)
-                p_b = row[6].split('-')
-                inputs['bdat'].set_value(f"{p_b[2]}.{p_b[1]}.{p_b[0]}")
-                
-                de_ldat = ""
-                if row[7]:
-                    p_l = row[7].split('-')
-                    de_ldat = f"{p_l[2]}.{p_l[1]}.{p_l[0]}"
-                inputs['ldat'].set_value(de_ldat)
-                
-                import media
-                media.medien_status['aktiver_artikel'] = row[1] # ArtikelNummer für Medien-Engine
-                media.lade_bilder_galerie(galerie_panel, grossbild)
-                lade_bewertung(art_id)
-                
-                if 'btn_hinzufuegen' in inputs and inputs['btn_hinzufuegen']: inputs['btn_hinzufuegen'].disable()
-                if 'btn_aktualisieren' in inputs and inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].disable()
+# Globale RAM-Zustände für das aktuell im Dashboard aktive Profil-Gedächtnis
+aktiver_lieferant_id = None
+aktives_reward_profil_id = None
 
-    # === DYNAMISCHE TIPP-ÜBERWACHUNG ===
-    def schalte_buttons_auf_geaendert():
-        """Wird getriggert, sobald Otto ein Zeichen in den Stammdaten ändert."""
-        if inputs and 'btn_hinzufuegen' in inputs and inputs['btn_hinzufuegen']:
-            import media
-            if media.medien_status['aktiver_artikel']:
-                inputs['btn_hinzufuegen'].disable()
-                if inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].enable()
-            else:
-                inputs['btn_hinzufuegen'].enable()
-                if inputs['btn_aktualisieren']: inputs['btn_aktualisieren'].disable()
+# Hilfsvariablen, um die Text-Labels live im Header zu aktualisieren
+header_labels = {}
 
-    # Live-Überwachung an alle kritischen Eingabefelder anheften!
-    for feld in ['num', 'bez', 'besch', 'bnr', 'preis', 'bdat', 'ldat']:
-        if feld in inputs and inputs[feld]:
-            inputs[feld].on_value_change(schalte_buttons_auf_geaendert)
+def de_datum_format(iso_str):
+    """Macht aus dem DB-Format JJJJ-MM-TT wieder ein lesbares TT.MM.JJJJ für das Auge."""
+    if not iso_str or '-' not in iso_str: return iso_str if iso_str else ""
+    p = iso_str.split('-')
+    return f"{p[2]}.{p[1]}.{p[0]}"
 
-    # UI-Klick-Aktionen absolut sicher im geladenen Scope binden
-    inputs['btn_leeren'].on('click', lambda: [maske_leeren(), database.bereinige_verwaiste_bilder(), ui.notify('Maske geleert.', type='info')])
-    inputs['btn_loeschen'].on('click', lambda: artikel_loeschen())
-    inputs['btn_aktualisieren'].on('click', lambda: artikel_aktualisieren())
-    inputs['btn_hinzufuegen'].on('click', lambda: artikel_hinzufuegen())
+def lade_reward_profil_details_in_dialog(profil_id, container_details):
+    """Holt bei Auswahl in der ComboBox die Vorgaben aus der DB und zeichnet sie in voller Pracht."""
+    container_details.clear()
+    if not profil_id:
+        return
+        
+    details = database.hole_reward_profil_details(profil_id)
+    if details:
+        with container_details:
+            with ui.column().classes('w-full gap-1 mt-1 text-xs'):
+                with ui.row().classes('gap-1'):
+                    ui.label('Zielvereinbarung:').classes('font-medium text-slate-500 w-28')
+                    ui.label(details['vorgaben']).classes('text-slate-700 italic')
+                with ui.row().classes('gap-1 mt-1'):
+                    ui.label('Beschreibung:').classes('font-medium text-slate-500 w-28')
+                    ui.label(details['beschreibung']).classes('text-slate-600 leading-relaxed')
+
+def update_profil_auswahl_kaskade(lieferant_id, select_reward, container_details):
+    """Triggert die Kaskade: Lädt die Profile neu, sobald der Lieferant gewechselt wird."""
+    container_details.clear()
+    # 1. Neue, gefilterte Optionen aus der Datenbank holen
+    neue_optionen = database.hole_reward_profile_fuer_lieferant(lieferant_id)
     
-    # Medien-Aktionen binden (Das Uploader-Event läuft jetzt unzerstörbar inline!)
-    inputs['btn_main'].on('click', lambda: media.setze_hauptbild(galerie_panel, grossbild, tabelle))
-    inputs['btn_del_bild'].on('click', lambda: media.bild_loeschen(galerie_panel, grossbild, tabelle))
-    
-    suchfeld.on_value_change(lambda e: suche())
-    tabelle.on('row-click', row_click)
+    # 2. ComboBox im Browser live updaten und nullen
+    select_reward.set_options(neue_optionen)
+    select_reward.set_value(None)
 
-    return {
-        'suche': suche, 'row_click': row_click, 'leeren': maske_leeren,
-        'loeschen': artikel_loeschen, 'aktualisieren': artikel_aktualisieren, 'hinzufuegen': artikel_hinzufuegen
-    }
+def profil_im_header_aktivieren(dialog, inputs):
+    """Speichert die Auswahl im RAM und aktualisiert den Header reaktiv."""
+    global aktiver_lieferant_id, aktives_reward_profil_id
+    
+    aktiver_lieferant_id = inputs['select_lieferant'].value
+    aktives_reward_profil_id = inputs['select_reward'].value
+    
+    lieferant_name = "Kein Lieferant"
+    profil_name = "Kein Profil"
+    
+    if inputs['select_lieferant'].value:
+        lieferant_name = inputs['select_lieferant'].options.get(aktiver_lieferant_id, "Kein Lieferant")
+    if inputs['select_reward'].value:
+        profil_name = inputs['select_reward'].options.get(aktives_reward_profil_id, "Kein Profil")
+        
+    # PROFI-FIX: .set_text() statt .set_value() angewendet!
+    header_labels['txt_badge'].set_text(f"{lieferant_name} | {profil_name}")
+    
+    ui.notify('Testprofil erfolgreich scharfgeschaltet!', type='positive')
+    dialog.close()
+
+def baue_kopfzeile():
+    """Rendert die obere Kopfzeile mitsamt dem automatischen Boot-Loader für aktive Profile."""
+    global aktiver_lieferant_id, aktives_reward_profil_id
+    
+    # PROFI-BOOT-LOADER: Wir prüfen beim Laden der Seite, ob heute ein Profil aktiv ist!
+    heute_profil = database.hole_heute_aktives_testprofil()
+    
+    initialer_text = "Kein Profil aktiv"
+    if heute_profil:
+        # IDs und Namen direkt aus der DB-Historie ins RAM einrasten lassen!
+        aktiver_lieferant_id = heute_profil['l_id']
+        aktives_reward_profil_id = heute_profil['r_id']
+        initialer_text = f"{heute_profil['l_name']} | {heute_profil['r_name']}"
+
+    with ui.row().classes('w-full items-center justify-between p-3 bg-slate-800 text-white shadow shrink-0'):
+        with ui.row().classes('items-center gap-2'):
+            ui.icon('inventory').classes('text-xl text-blue-400')
+            ui.label('Warenwirtschaft & Produkttest').classes('text-base font-bold tracking-wide')
+            
+        # DIE COMPAKTE INFO-BOX IM HEADER (Zeigt jetzt ab Sekunde 1 den echten DB-Status an!)
+        with ui.row().classes('items-center gap-1.5 bg-slate-700 px-2.5 py-1 rounded-md border border-slate-600 text-xs cursor-pointer hover:bg-slate-600 transition-colors') as reward_badge:
+            ui.icon('workspace_premium').classes('text-sm text-amber-400')
+            
+            # Befüllt das Label reaktiv mit dem ermittelten Start-Zustand
+            header_labels['txt_badge'] = ui.label(initialer_text).classes('font-bold text-white')
+            
+            ui.icon('info').classes('text-[14px] text-slate-400 ml-0.5')
+        
+        reward_badge.on('click', zeige_status_details)
+
+def _baue_tab_lieferanten(panel):
+    """Rendert Lieferanten-Eingabe und deren Löschliste."""
+    with panel:
+        ui.label('Neuen Lieferanten verankern:').classes('font-bold text-slate-600')
+        with ui.row().classes('w-full items-center gap-2 mb-2 flex-nowrap'):
+            inp = ui.input(placeholder='Name...').props('outlined dense').classes('flex-1 text-xs')
+            def save():
+                if database.lieferant_speichern(inp.value) == "Dublette": ui.notify('Existiert bereits!', type='negative')
+                elif inp.value: ui.notify('Erfolgreich!', type='positive'); inp.set_value(''); box.clear(); draw()
+            ui.button('Anlegen', on_click=save).props('dense unelevated').classes('rounded px-3 text-xs bg-slate-600 text-white')
+        box = ui.column().classes('w-full gap-1 max-h-36 overflow-y-auto')
+        def draw():
+            with box:
+                for idx, name in database.hole_alle_lieferanten().items():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-xs flex-nowrap'):
+                        ui.label(name)
+                        ui.button(icon='delete', on_click=lambda e, i=idx: [database.lieferant_loeschen(i), ui.notify('Gelöscht'), box.clear(), draw()]).props('dense flat text-color=red-500')
+        draw()
+
+def _baue_tab_reward_profile(panel):
+    """Rendert Reward-Eingabe und Lieferanten-Profile mit On-Demand-Refresh."""
+    with panel:
+        ui.label('Profile für Lieferanten definieren:').classes('font-bold text-slate-600')
+        
+        # Das Dropdown zieht sich die Optionen LIVE im Moment des Klicks (on-focus)
+        sel_l = ui.select(options=database.hole_alle_lieferanten(), on_change=lambda e: [box.clear(), draw(e.value)]).props('outlined dense').classes('w-full text-xs')
+        sel_l.on('focus', lambda: sel_l.set_options(database.hole_alle_lieferanten()))
+        
+        inp_n = ui.input(placeholder='Profil-Name (z.B. Premium)...').props('outlined dense').classes('w-full text-xs')
+        inp_z = ui.input(placeholder='Zielvorgabe...').props('outlined dense').classes('w-full text-xs')
+        inp_b = ui.textarea(placeholder='Beschreibung...').props('outlined dense rows=2').classes('w-full text-xs')
+        
+        def save():
+            if database.reward_profil_speichern(sel_l.value, inp_n.value, inp_z.value, inp_b.value) == "Dublette": ui.notify('Profil existiert bereits!', type='negative')
+            else: ui.notify('Erfolgreich!', type='positive'); inp_n.set_value(''); box.clear(); draw(sel_l.value)
+        ui.button('Profil speichern', on_click=save).props('dense unelevated').classes('w-full bg-slate-600 text-white rounded text-xs mt-1')
+        
+        box = ui.column().classes('w-full gap-1 max-h-32 overflow-y-auto mt-2')
+        def draw(lid):
+            if not lid: return
+            import sqlite3
+            with box, sqlite3.connect(database.DB_PATH) as conn:
+                for pid, pname in conn.execute("SELECT ID, ProfilName FROM RewardProfile WHERE LieferantenID=?", (lid,)).fetchall():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-xs flex-nowrap'):
+                        ui.label(pname)
+                        ui.button(icon='delete', on_click=lambda e, p=pid: [conn.execute("DELETE FROM RewardProfile WHERE ID=?", (p,)), ui.notify('Entfernt'), box.clear(), draw(lid)]).props('dense flat text-color=red-500')
+
+def _baue_tab_testzeitraeume(panel, dialog):
+    """Aktiviert Perioden inkl. Kalendericons, Kaskade und listet nahtlose Historie auf."""
+    global aktiver_lieferant_id, aktives_reward_profil_id
+    with panel:
+        p_in = {}
+        
+        # Lieferantenauswahl mit Focus-Refresh und Live-Kaskade für das Reward-Feld
+        p_in['select_lieferant'] = ui.select(options=database.hole_alle_lieferanten(), value=aktiver_lieferant_id).props('outlined dense').classes('w-full text-xs')
+        p_in['select_lieferant'].on('focus', lambda: p_in['select_lieferant'].set_options(database.hole_alle_lieferanten()))
+        
+        p_in['select_reward'] = ui.select(options=database.hole_reward_profile_fuer_lieferant(aktiver_lieferant_id), value=aktives_reward_profil_id).props('outlined dense').classes('w-full text-xs')
+        
+        # Kaskaden-Bypass: Wenn der Lieferant wechselt, laden wir die Rewards dieses Lieferanten sofort nach
+        p_in['select_lieferant'].on_value_change(lambda e: [
+            p_in['select_reward'].set_options(database.hole_reward_profile_fuer_lieferant(e.value)),
+            p_in['select_reward'].set_value(None),
+            det.clear()
+        ])
+        p_in['select_reward'].on_value_change(lambda e: lade_reward_profil_details_in_dialog(e.value, det))
+
+        # --- KALENDER-ICONS WIEDER HERGESTELLT & IN ISOLIERTE KÄFIGE GESPERRT ---
+        with ui.row().classes('w-full items-center gap-2 flex-nowrap overflow-visible'):
+            with ui.element('div').classes('relative inline-block w-1/2'):
+                start_field = ui.input(placeholder='Von (TT.MM.JJJJ)').props('outlined dense').classes('w-full text-xs')
+                p_in['start_input'] = start_field
+                with start_field.add_slot('append'):
+                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: m_start.open())
+                with ui.menu().props('no-parent-event') as m_start:
+                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=start_field, m=m_start: [t.set_value(e.value), m.close()])
+
+            with ui.element('div').classes('relative inline-block w-1/2'):
+                ende_field = ui.input(placeholder='Bis (TT.MM.JJJJ)').props('outlined dense').classes('w-full text-xs')
+                p_in['ende_input'] = ende_field
+                with ende_field.add_slot('append'):
+                    ui.icon('edit_calendar').classes('cursor-pointer').on('click', lambda: menu_ende.open())
+                with ui.menu().props('no-parent-event') as menu_ende:
+                    ui.date(mask='DD.MM.YYYY', on_change=lambda e, t=ende_field, m=menu_ende: [t.set_value(e.value), m.close()])
+
+        det = ui.column().classes('w-full gap-0.5 text-[11px]')
+        if aktives_reward_profil_id: lade_reward_profil_details_in_dialog(aktives_reward_profil_id, det)
+        
+        def activate():
+            if not p_in['select_lieferant'].value or not p_in['select_reward'].value or not p_in['start_input'].value or not p_in['ende_input'].value:
+                ui.notify('Bitte befüllen Sie alle Felder!', type='warning')
+                return
+            database.test_profil_historie_speichern(p_in['select_lieferant'].value, p_in['select_reward'].value, p_in['start_input'].value, p_in['ende_input'].value, "")
+            profil_im_header_aktivieren(dialog, p_in)
+            
+        ui.button('Perioden-Aktivierung', on_click=activate).props('dense unelevated').classes('w-full bg-slate-600 text-white rounded text-xs mt-1')
+        ui.label('📋 Perioden-Historie (Nahtlosigkeits-Check):').classes('font-bold text-slate-500 mt-2 border-t pt-1 text-[11px]')
+        
+        hist_box = ui.column().classes('w-full gap-1 max-h-28 overflow-y-auto')
+        def draw_hist():
+            with hist_box:
+                for item in database.hole_alle_testprofile_historie():
+                    with ui.row().classes('w-full justify-between items-center bg-slate-50 p-1 rounded border text-[11px] flex-nowrap'):
+                        ui.label(f"{item['lieferant']} ({item['profil']}): {item['zeitraum']}")
+                        ui.button(icon='delete', on_click=lambda e, t=item['id']: [database.testzeitraum_loeschen(t), ui.notify('Entfernt'), hist_box.clear(), draw_hist()]).props('dense flat text-color=red-400')
+        draw_hist()
+
+def zeige_status_details():
+    """Öffnet das kaskadierende Kontrollzentrum als schlanke Stammdatenpflege-Maske."""
+    with ui.dialog() as dialog, ui.card().classes('p-3 min-w-[500px] max-w-[550px] border shadow-xl rounded-lg bg-white'):
+        with ui.column().classes('w-full gap-2 text-xs'):
+            with ui.row().classes('w-full items-center justify-between border-b pb-1 shrink-0'):
+                ui.label('⚙️ Stammdaten- & Profilpflege').classes('text-xs font-bold text-slate-700')
+                ui.button(icon='close', on_click=dialog.close).props('dense flat text-color=slate-400')
+            with ui.tabs().classes('w-full dense text-slate-500 border-b') as pflege_tabs:
+                t1 = ui.tab('1. Lieferanten', icon='business')
+                t2 = ui.tab('2. Rewards', icon='workspace_premium')
+                t3 = ui.tab('3. Historie', icon='date_range')
+            with ui.tab_panels(pflege_tabs, value=t3).classes('w-full p-0 bg-white overflow-visible'):
+                _baue_tab_lieferanten(ui.tab_panel(t1).classes('p-1 gap-2 flex flex-col'))
+                _baue_tab_reward_profile(ui.tab_panel(t2).classes('p-1 gap-2 flex flex-col'))
+                _baue_tab_testzeitraeume(ui.tab_panel(t3).classes('p-1 gap-2 flex flex-col overflow-visible'), dialog)
+        dialog.open()
+
+# 4. SERVER-START (Port 8090)
+if __name__ in {"__main__", "__mp_main__"}:
+    ui.run(title='Bewertungsmanagement 3.0', reload=False, port=8090, show=False)
+
+# https://share.google/aimode/4LUOZ30lI2YbvqcrD
